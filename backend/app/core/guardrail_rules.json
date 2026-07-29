@@ -1,0 +1,56 @@
+{
+  "injection_rules": [
+    {
+      "id": "INJ_001",
+      "name": "IGNORE_INSTRUCTIONS",
+      "pattern": "\\bignore\\s+(all\\s+)?previous\\s+instructions\\b"
+    },
+    {
+      "id": "INJ_002",
+      "name": "SYSTEM_PROMPT_OVERRIDE",
+      "pattern": "\\bsystem\\s+prompt\\s+override\\b"
+    },
+    {
+      "id": "INJ_003",
+      "name": "DAN_MODE_OVERRIDE",
+      "pattern": "\\byou\\s+are\\s+now\\s+DAN\\b"
+    },
+    {
+      "id": "INJ_004",
+      "name": "BYPASS_SAFETY_FILTERS",
+      "pattern": "\\bbypass\\s+safety\\s+filters\\b"
+    },
+    {
+      "id": "INJ_005",
+      "name": "REVEAL_PROMPT",
+      "pattern": "\\breveal\\s+(system\\s+)?prompt\\b"
+    },
+    {
+      "id": "INJ_006",
+      "name": "UNRESTRICTED_ROLEPLAY",
+      "pattern": "\\broleplay\\s+as\\s+unrestricted\\b"
+    }
+  ],
+  "pii_rules": [
+    {
+      "type": "SSN",
+      "pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+    },
+    {
+      "type": "CREDIT_CARD",
+      "pattern": "\\b(?:\\d{4}[-\\s]?){3}\\d{4}\\b"
+    },
+    {
+      "type": "EMAIL",
+      "pattern": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"
+    },
+    {
+      "type": "PHONE",
+      "pattern": "\\b(?:\\+?\\d{1,3}[-.\\s]?)?\\(?\\d{3}\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}\\b"
+    },
+    {
+      "type": "API_KEY",
+      "pattern": "\\b(?:sk-[A-Za-z0-9]{20,}|gsk_[A-Za-z0-9]{20,}|lsv2_pt_[A-Za-z0-9]{20,})\\b"
+    }
+  ]
+}
