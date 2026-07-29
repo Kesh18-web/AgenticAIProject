@@ -3,6 +3,12 @@
 *.env
 backend/.env
 
+# Internal developer notes & agent configs
+implementation.md
+.agents/
+frontend/AGENTS.md
+frontend/CLAUDE.md
+
 # Python virtual environment & cache
 venv/
 backend/venv/
