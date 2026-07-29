@@ -1,0 +1,26 @@
+# Environment variables (Protect secrets)
+.env
+*.env
+backend/.env
+
+# Python virtual environment & cache
+venv/
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+
+# Node.js / Next.js
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
+out/
+build/
+
+# IDE & OS
+.DS_Store
+Thumbs.db
