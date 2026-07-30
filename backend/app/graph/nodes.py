@@ -50,6 +50,16 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
     bm25_weight = float(plan.get("bm25_weight", 0.5))
     dense_weight = float(plan.get("dense_weight", 0.5))
     sub_tasks = plan.get("sub_tasks", [])
+    requires_rag = plan.get("requires_rag", True)
+
+    # Fast-path bypass for general knowledge queries that do not require document retrieval
+    if not requires_rag:
+        return {
+            "rewritten_queries": [],
+            "retrieved_chunks": [],
+            "reranked_chunks": [],
+            "context_text": "General Knowledge Query (RAG Search Bypassed).",
+        }
 
     # 1. Build search targets: User Query + Sub-Tasks from Planner + Sub-Query Variations
     search_queries = [query]
@@ -62,6 +72,10 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
 
     # Deduplicate search targets while preserving order
     unique_search_targets = list(dict.fromkeys(search_queries))
+
+    # Determine search scope: Read user explicit selection directly from state ('session' default vs 'global')
+    search_scope = state.get("search_scope", "session")
+    session_filter = state.get("session_id") if search_scope == "session" else None
 
     # 2. Retrieve via Dynamic Weighted Hybrid RRF across ALL sub-task & query targets
     dummy_query_emb = [0.01 * (i + 1) for i in range(384)]
@@ -76,6 +90,7 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
             top_k=top_k,
             dense_weight=dense_weight,
             bm25_weight=bm25_weight,
+            session_id=session_filter,
             trace_id=trace_id,
         )
         for chunk in sub_hits:
@@ -94,7 +109,7 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
     context_text = context_builder.build_context(reranked_chunks, trace_id=trace_id)
 
     return {
-        "rewritten_queries": rewritten_queries,
+        "rewritten_queries": rewritten_variations,
         "retrieved_chunks": all_retrieved_chunks,
         "reranked_chunks": reranked_chunks,
         "context_text": context_text,
