@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from backend.app.core.config import settings
 from backend.app.core.logging import logger
 
@@ -120,6 +120,36 @@ class FirestoreManager:
                 f"Error reading from Firestore [{collection_name}/{doc_id}]: {e}"
             )
             return None
+
+    def get_session_history(
+        self, session_id: str, limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Retrieve past conversation turns for multi-turn chat memory."""
+        try:
+            turns_ref = self.db.collection("sessions").document(session_id).collection("turns")
+            if self.is_mock:
+                return []
+            
+            docs = turns_ref.order_by("timestamp", direction=gfirestore.Query.DESCENDING).limit(limit).stream()
+            history = [doc.to_dict() for doc in docs]
+            history.reverse()
+            return history
+        except Exception as e:
+            logger.error(f"Error fetching session history for [{session_id}]: {e}")
+            return []
+
+    def list_collection_documents(
+        self, collection_name: str, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """List uploaded document metadata records from Firestore."""
+        try:
+            if self.is_mock:
+                return []
+            docs = self.db.collection(collection_name).limit(limit).stream()
+            return [doc.to_dict() for doc in docs]
+        except Exception as e:
+            logger.error(f"Error listing collection [{collection_name}]: {e}")
+            return []
 
 
 # Global singleton instance
