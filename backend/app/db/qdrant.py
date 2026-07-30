@@ -86,19 +86,20 @@ class QdrantVectorStoreManager:
 
             points = []
             for idx, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-                point_id = chunk.get("chunk_id", idx)
+                doc_id = chunk.get("doc_id", "doc_unknown")
+                point_id = abs(hash(f"{doc_id}_{idx}")) & 0x7FFFFFFF
 
-                # Ensure payload contains text and doc metadata
                 payload = {
                     "text": chunk.get("text", ""),
-                    "doc_id": chunk.get("doc_id", "doc_unknown"),
+                    "doc_id": doc_id,
                     "source_name": chunk.get("source_name", "unknown"),
                     "page_number": chunk.get("page_number", 1),
                     "chunk_index": chunk.get("chunk_index", idx),
+                    "session_id": chunk.get("session_id", "default_session"),
                 }
 
                 points.append(
-                    qmodels.PointStruct(id=idx, vector=emb, payload=payload)
+                    qmodels.PointStruct(id=point_id, vector=emb, payload=payload)
                 )
 
             self.client.upsert(collection_name=collection_name, points=points)
@@ -113,17 +114,34 @@ class QdrantVectorStoreManager:
             return False
 
     def search_dense(
-        self, collection_name: str, query_embedding: List[float], limit: int = 10
+        self,
+        collection_name: str,
+        query_embedding: List[float],
+        limit: int = 10,
+        session_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Perform dense vector search in Qdrant."""
+        """Perform dense vector search in Qdrant with optional session_id filtering."""
         if not self.client:
             return []
 
         try:
+            # Build Qdrant payload filter if session_id is provided
+            query_filter = None
+            if session_id and HAS_QDRANT_LIB:
+                query_filter = qmodels.Filter(
+                    must=[
+                        qmodels.FieldCondition(
+                            key="session_id",
+                            match=qmodels.MatchValue(value=session_id),
+                        )
+                    ]
+                )
+
             if hasattr(self.client, "query_points"):
                 response = self.client.query_points(
                     collection_name=collection_name,
                     query=query_embedding,
+                    query_filter=query_filter,
                     limit=limit,
                 )
                 results = getattr(response, "points", response)
@@ -131,6 +149,7 @@ class QdrantVectorStoreManager:
                 results = self.client.search(
                     collection_name=collection_name,
                     query_vector=query_embedding,
+                    query_filter=query_filter,
                     limit=limit,
                 )
             else:
@@ -147,6 +166,7 @@ class QdrantVectorStoreManager:
                         "doc_id": payload.get("doc_id", ""),
                         "source_name": payload.get("source_name", ""),
                         "page_number": payload.get("page_number", 1),
+                        "session_id": payload.get("session_id", ""),
                         "retrieval_method": "dense",
                     }
                 )
