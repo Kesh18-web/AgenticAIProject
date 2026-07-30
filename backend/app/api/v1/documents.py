@@ -14,6 +14,7 @@ class DocumentUploadRequest(BaseModel):
     title: str
     content: str
     source_name: str = "Uploaded Document"
+    session_id: str = "default_session"
 
 
 @router.post("/index")
@@ -33,6 +34,7 @@ async def index_document(req: DocumentUploadRequest):
                 "chunk_id": f"{doc_id}_{idx}",
                 "doc_id": doc_id,
                 "source_name": req.source_name,
+                "session_id": req.session_id,
                 "page_number": 1,
                 "chunk_index": idx,
                 "text": para,
