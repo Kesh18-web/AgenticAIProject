@@ -30,6 +30,7 @@ class CitationEngine:
                         "source_name": chunk.get("source_name", "Unknown Document"),
                         "page_number": chunk.get("page_number", 1),
                         "snippet": chunk.get("text", "")[:150] + "...",
+                        "confidence": chunk.get("reranker_confidence", 0.90),
                     }
                     citations.append(citation_entry)
 
