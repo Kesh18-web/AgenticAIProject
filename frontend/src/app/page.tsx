@@ -50,9 +50,11 @@ export default function AnalystDashboard() {
   const [backendStatus, setBackendStatus] = useState<any>(null);
 
   // Workbench Query State
+  // Workbench Query State
   const [query, setQuery] = useState(
     "What are the rules for multi-factor authentication and inactive account management under cybersecurity compliance?"
   );
+  const [searchScope, setSearchScope] = useState<"session" | "global">("session");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [activeNode, setActiveNode] = useState<string | null>(null);
   const [nodeEvents, setNodeEvents] = useState<NodeEvent[]>([]);
@@ -105,7 +107,7 @@ export default function AnalystDashboard() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query }),
+          body: JSON.stringify({ query, search_scope: searchScope }),
         }
       );
 
@@ -307,9 +309,35 @@ export default function AnalystDashboard() {
             <div className="space-y-6 max-w-7xl mx-auto">
               {/* Query Card */}
               <div className="glass-panel rounded-2xl p-5 border border-slate-800">
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                  Enterprise Compliance Inquiry
-                </label>
+                <div className="flex items-center justify-between mb-3">
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                    Enterprise Compliance Inquiry
+                  </label>
+                  <div className="flex items-center gap-1 bg-slate-900/90 p-1 rounded-xl border border-slate-800 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setSearchScope("session")}
+                      className={`px-3 py-1 rounded-lg transition font-medium ${
+                        searchScope === "session"
+                          ? "bg-indigo-600 text-white shadow-md shadow-indigo-500/20"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      Current Chat Only
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSearchScope("global")}
+                      className={`px-3 py-1 rounded-lg transition font-medium ${
+                        searchScope === "global"
+                          ? "bg-indigo-600 text-white shadow-md shadow-indigo-500/20"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      Global Workspace Knowledge
+                    </button>
+                  </div>
+                </div>
                 <div className="flex gap-3">
                   <input
                     type="text"
