@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -7,10 +8,22 @@ from backend.app.api.v1.health import router as health_router
 from backend.app.core.config import settings
 from backend.app.core.logging import logger
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Modern FastAPI Lifespan Context Manager handling server startup & graceful shutdown."""
+    logger.info(
+        f"Started Enterprise AI Analyst FastAPI Server on port {settings.PORT} (env={settings.ENVIRONMENT})"
+    )
+    yield
+    logger.info("Executing graceful shutdown for Enterprise AI Analyst API server.")
+
+
 app = FastAPI(
     title="Enterprise AI Analyst API",
     description="Production Modular AI Agent Runtime & Hybrid RAG Engine powered by LangGraph, Qdrant, and Firestore",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Enable CORS for Next.js Frontend
@@ -26,10 +39,3 @@ app.add_middleware(
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
 app.include_router(analyze_router, prefix="/api/v1")
-
-
-@app.on_event("startup")
-async def startup_event():
-    logger.info(
-        f"Started Enterprise AI Analyst FastAPI Server on port {settings.PORT} (env={settings.ENVIRONMENT})"
-    )
