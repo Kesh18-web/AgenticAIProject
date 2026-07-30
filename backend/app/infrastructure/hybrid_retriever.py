@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from backend.app.core.logging import logger, logger_timer
 from backend.app.db.bm25 import BM25Indexer
 from backend.app.db.qdrant import QdrantVectorStoreManager
@@ -62,25 +62,29 @@ class HybridRetriever:
         top_k: int = 10,
         dense_weight: float = 0.5,
         bm25_weight: float = 0.5,
+        session_id: Optional[str] = None,
         trace_id: str = "N/A",
     ) -> List[Dict[str, Any]]:
         """Retrieve and rank candidates using hybrid dense vector search + BM25 keyword search + Weighted RRF."""
         with logger_timer("HybridRetriever: Weighted Search & Fusion", trace_id=trace_id) as log:
             log.info(
-                f"Executing weighted hybrid retrieval for query: '{query}' | dense_weight={dense_weight:.2f} | bm25_weight={bm25_weight:.2f}"
+                f"Executing weighted hybrid retrieval for query: '{query}' | dense_weight={dense_weight:.2f} | bm25_weight={bm25_weight:.2f} | session_id={session_id}"
             )
 
-            # 1. Execute Dense Vector Search
+            # 1. Execute Dense Vector Search with Session Filter
             dense_hits = []
             if query_embedding:
                 dense_hits = self.qdrant_mgr.search_dense(
                     collection_name=collection_name,
                     query_embedding=query_embedding,
                     limit=top_k * 2,
+                    session_id=session_id,
                 )
 
-            # 2. Execute BM25 Keyword Search
-            bm25_hits = self.bm25_mgr.search_bm25(query=query, top_k=top_k * 2)
+            # 2. Execute BM25 Keyword Search with Session Filter
+            bm25_hits = self.bm25_mgr.search_bm25(
+                query=query, top_k=top_k * 2, session_id=session_id
+            )
 
             # 3. Fuse via Weighted Reciprocal Rank Fusion (Weighted RRF)
             fused_candidates = reciprocal_rank_fusion(
