@@ -10,6 +10,7 @@ class ChunkMetadata(TypedDict, total=False):
     line_end: Optional[int]
     score: float
     retrieval_method: str  # 'dense', 'bm25', or 'hybrid_rrf'
+    session_id: Optional[str]
 
 
 class Citation(TypedDict):
@@ -17,6 +18,7 @@ class Citation(TypedDict):
     source_name: str
     page_number: Optional[int]
     snippet: str
+    confidence: Optional[float]
 
 
 class AnalystState(TypedDict, total=False):
@@ -26,6 +28,7 @@ class AnalystState(TypedDict, total=False):
     user_query: str
     trace_id: str
     session_id: str
+    search_scope: str  # 'session' (current chat) vs 'global' (workspace-wide)
 
     # Guardrails
     guardrail_status: Dict[str, Any]  # e.g., {'safe': True, 'reason': None}
