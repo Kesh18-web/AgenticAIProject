@@ -14,20 +14,47 @@ class AnalysisAgent:
         trace_id = state.get("trace_id", "N/A")
         reranked_chunks = state.get("reranked_chunks", [])
         selected_model = state.get("selected_model", "gemini-1.5-pro")
+        replan_count = state.get("reflection_count", 0)
+        critique = state.get("reflection_critique", "")
+        plan = state.get("plan", {})
+        requires_rag = plan.get("requires_rag", True)
 
         with logger_timer("AnalysisAgent: Report Synthesis", trace_id=trace_id) as log:
-            log.info(f"Synthesizing grounded compliance report using model [{selected_model}]...")
+            log.info(f"Synthesizing report using model [{selected_model}] (requires_rag={requires_rag}, replan_count={replan_count})...")
 
+            # 1. Direct General Knowledge Bypass (when query doesn't require RAG documents)
+            if not requires_rag:
+                try:
+                    llm = get_llm(model_name=selected_model, temperature=0.3)
+                    prompt = (
+                        f"User Inquiry: {query}\n\n"
+                        "You are an Enterprise AI Assistant. Provide a clear, comprehensive, accurate, and direct response to the user inquiry based on general knowledge."
+                    )
+                    response = llm.invoke(prompt)
+                    report_text = str(response.content).strip()
+                    log.info(f"Direct General Knowledge Answer Generated ({len(report_text)} chars)")
+                    return report_text
+                except Exception as e:
+                    log.warning(f"[FALLBACK_TRIGGERED] General knowledge LLM response failed: {e}")
+                    return f"### Response\n{query}\n\n(Direct response synthesis unavailable)."
+
+            # 2. RAG Compliance Query Path (Requires retrieved evidence)
             if not reranked_chunks:
-                report = f"### Executive Summary\nNo relevant documentation or policy evidence was found for query: '{query}'."
+                report = f"### Executive Summary\nNo relevant documentation or policy evidence was found in corporate repositories for query: '{query}'."
                 return report
 
             # 1. Try Live LLM Report Synthesis with Selected Model
             try:
                 llm = get_llm(model_name=selected_model, temperature=0.2)
+                
+                critique_instruction = ""
+                if replan_count > 0 and critique:
+                    critique_instruction = f"\nRE-PLANNING FEEDBACK: A previous draft received low confidence due to the following critique: '{critique}'. Ensure this revised report explicitly addresses these missing evidence gaps!\n"
+
                 prompt = (
                     f"User Query: {query}\n\n"
-                    f"Retrieved Grounded Context Chunks:\n{context_text}\n\n"
+                    f"Retrieved Grounded Context Chunks:\n{context_text}\n"
+                    f"{critique_instruction}\n"
                     "You are an Enterprise AI Lead Compliance Analyst. Synthesize a comprehensive, executive-ready analysis report.\n"
                     "Mandatory Guidelines:\n"
                     "1. Ground every claim directly in the provided context chunks.\n"
