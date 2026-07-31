@@ -140,13 +140,15 @@ export default function AnalystDashboard() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
+        const lines = buffer.split("\n");
         buffer = lines.pop() || "";
 
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
+        for (const rawLine of lines) {
+          const cleanLine = rawLine.trim();
+          if (cleanLine.startsWith("data: ")) {
             try {
-              const data = JSON.parse(line.replace("data: ", ""));
+              const jsonStr = cleanLine.replace(/^data:\s*/, "");
+              const data = JSON.parse(jsonStr);
 
               if (data.event === "node_complete") {
                 setActiveNode(data.node);
