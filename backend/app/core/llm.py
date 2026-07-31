@@ -22,13 +22,12 @@ def get_llm(
     temperature: float = 0.0,
     max_tokens: Optional[int] = None,
 ) -> BaseChatModel:
-    """Unified LLM Factory returning live ChatGoogleGenerativeAI, ChatOpenAI, or fallback models."""
+    """Unified LLM Factory returning live ChatGoogleGenerativeAI with seamless Groq fallback on Rate Limits."""
 
-    # 1. Groq (fastest, free tier) - llama-3.3-70b-versatile
+    groq_llm = None
     if settings.GROQ_API_KEY and HAS_OPENAI:
         try:
-            logger.debug("Instantiating Live Groq LLM via OpenAI compatible client")
-            return ChatOpenAI(
+            groq_llm = ChatOpenAI(
                 model="llama-3.3-70b-versatile",
                 api_key=settings.GROQ_API_KEY,
                 base_url="https://api.groq.com/openai/v1",
@@ -38,21 +37,31 @@ def get_llm(
         except Exception as e:
             logger.error(f"Failed to instantiate Groq LLM: {e}")
 
-    # 2. Google Gemini Flash
+    # 1. Google Gemini (Primary Choice)
     if settings.GEMINI_API_KEY and HAS_GEMINI:
-        target_model = model_name if model_name and "gemini" in model_name else "gemini-2.0-flash"
+        target_model = model_name if model_name and ("gemini" in model_name or "gpt" in model_name) else "gemini-2.0-flash"
+        if target_model in ["gemini-1.5-flash", "gpt-4o-mini", "mock-reasoning-model"]:
+            target_model = "gemini-2.0-flash"
         try:
             logger.debug(f"Instantiating Live Gemini LLM: {target_model}")
-            return ChatGoogleGenerativeAI(
+            gemini_llm = ChatGoogleGenerativeAI(
                 model=target_model,
                 google_api_key=settings.GEMINI_API_KEY,
                 temperature=temperature,
                 max_output_tokens=max_tokens,
             )
+            # Attach Groq as auto-fallback if Gemini hits 429 rate limits or errors
+            if groq_llm:
+                return gemini_llm.with_fallbacks([groq_llm])
+            return gemini_llm
         except Exception as e:
-            logger.error(f"Failed to instantiate ChatGoogleGenerativeAI: {e}")
+            logger.error(f"Failed to instantiate ChatGoogleGenerativeAI [{target_model}]: {e}")
 
-    # 3. OpenAI GPT-4o / GPT-4o-mini
+    # 2. Return Groq directly if Gemini not configured
+    if groq_llm:
+        return groq_llm
+
+    # 3. OpenAI GPT-4o / GPT-4o-mini fallback
     if settings.OPENAI_API_KEY and HAS_OPENAI:
         target_model = model_name if model_name and "gpt" in model_name else "gpt-4o-mini"
         try:
@@ -66,7 +75,6 @@ def get_llm(
         except Exception as e:
             logger.error(f"Failed to instantiate ChatOpenAI: {e}")
 
-    # Fallback error if no live LLM keys are configured
     raise RuntimeError(
         "No active LLM provider found! Please ensure GEMINI_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY is set in backend/.env"
     )
