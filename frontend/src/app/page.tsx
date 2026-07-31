@@ -119,6 +119,11 @@ export default function AnalystDashboard() {
     setHitlRequired(false);
     setHitlApproved(false);
 
+    // Collect all parsed SSE events before animating, so we can replay with delays
+    const collectedNodeEvents: any[] = [];
+    let completePayload: any = null;
+    let hitlPayload: any = null;
+
     try {
       const response = await fetch(
         "http://localhost:8000/api/v1/analyze/stream",
@@ -149,33 +154,18 @@ export default function AnalystDashboard() {
             const trimmed = line.trim();
             if (trimmed.startsWith("data:")) {
               const jsonStr = trimmed.replace(/^data:\s*/, "").trim();
-              if (!jsonStr || (!jsonStr.startsWith("{") && !jsonStr.startsWith("["))) {
-                continue;
-              }
-
+              if (!jsonStr || (!jsonStr.startsWith("{") && !jsonStr.startsWith("["))) continue;
               try {
                 const data = JSON.parse(jsonStr);
-
                 if (data.event === "node_complete") {
-                  setActiveNode(data.node);
-                  setNodeEvents((prev) => [...prev, data]);
-                  if (data.node === "planner" && data.explainability_reason) {
-                    setExplainabilityReason(data.explainability_reason);
-                  }
+                  collectedNodeEvents.push(data);
                 } else if (data.event === "hitl_approval_required") {
-                  setHitlRequired(true);
-                  setExplainabilityReason(data.explainability_reason);
+                  hitlPayload = data;
                 } else if (data.event === "complete") {
-                  setFinalReport(data.report);
-                  setCitations(data.citations || []);
-                  setEvalScores(data.eval_scores || null);
-                  setCacheHit(data.semantic_cache_hit || false);
-                  setMemoryCompacted(data.memory_compacted || false);
-                  setTelemetry(data.telemetry || null);
-                  setActiveNode("complete");
+                  completePayload = data;
                 }
               } catch (e) {
-                console.error("Error parsing SSE JSON:", e, "jsonStr:", jsonStr);
+                console.error("SSE JSON parse error:", e, jsonStr);
               }
             }
           }
@@ -183,9 +173,53 @@ export default function AnalystDashboard() {
       }
     } catch (err) {
       console.error("SSE stream error:", err);
-    } finally {
-      setIsAnalyzing(false);
     }
+
+    // --- Animate node transitions sequentially with 600ms delay each ---
+    // Reset to guardrail first, then step through each node
+    setActiveNode("guardrail");
+    setNodeEvents([]);
+
+    const NODE_STEP_MS = 600;
+
+    collectedNodeEvents.forEach((data, idx) => {
+      setTimeout(() => {
+        setActiveNode(data.node);
+        setNodeEvents((prev) => {
+          // avoid duplicates on re-render
+          const alreadyAdded = prev.some(
+            (e) => e.node === data.node && e.trace_id === data.trace_id && prev.indexOf(e) === idx
+          );
+          return alreadyAdded ? prev : [...prev, data];
+        });
+        if (data.node === "planner" && data.explainability_reason) {
+          setExplainabilityReason(data.explainability_reason);
+        }
+      }, idx * NODE_STEP_MS);
+    });
+
+    // Apply hitl after node animations
+    if (hitlPayload) {
+      setTimeout(() => {
+        setHitlRequired(true);
+        setExplainabilityReason(hitlPayload.explainability_reason);
+      }, collectedNodeEvents.length * NODE_STEP_MS);
+    }
+
+    // Apply complete payload after all node animations
+    const totalDelay = collectedNodeEvents.length * NODE_STEP_MS + 200;
+    setTimeout(() => {
+      if (completePayload) {
+        setFinalReport(completePayload.report);
+        setCitations(completePayload.citations || []);
+        setEvalScores(completePayload.eval_scores || null);
+        setCacheHit(completePayload.semantic_cache_hit || false);
+        setMemoryCompacted(completePayload.memory_compacted || false);
+        setTelemetry(completePayload.telemetry || null);
+        setActiveNode("complete");
+      }
+      setIsAnalyzing(false);
+    }, totalDelay);
   };
 
   // Submit Document Indexing

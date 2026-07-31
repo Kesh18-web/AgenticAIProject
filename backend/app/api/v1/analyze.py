@@ -5,7 +5,7 @@ import uuid
 from typing import AsyncGenerator, Optional, Dict, Any
 from fastapi import APIRouter
 from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
+from starlette.responses import StreamingResponse
 from backend.app.core.logging import logger
 from backend.app.core.state import AnalystState
 from backend.app.graph.analyst_graph import analyst_graph
@@ -181,6 +181,12 @@ async def analyze_stream(req: AnalyzeRequest):
     session_id = req.session_id or f"session-{str(uuid.uuid4())[:8]}"
     search_scope = req.search_scope or "session"
     hitl_mode = req.hitl_mode or False
-    return EventSourceResponse(
-        stream_analysis_events(req.query, session_id, search_scope, hitl_mode)
+    return StreamingResponse(
+        stream_analysis_events(req.query, session_id, search_scope, hitl_mode),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
