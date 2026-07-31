@@ -1,9 +1,10 @@
+import asyncio
 import json
+import time
 import uuid
 from typing import AsyncGenerator, Optional, Dict, Any
 from fastapi import APIRouter
 from pydantic import BaseModel
-import time
 from sse_starlette.sse import EventSourceResponse
 from backend.app.core.logging import logger
 from backend.app.core.state import AnalystState
@@ -115,6 +116,7 @@ async def stream_analysis_events(
                     node_log["eval_scores"] = node_state.get("judge_eval_scores")
 
                 yield f"data: {json.dumps(node_log)}\n\n"
+                await asyncio.sleep(0.3)
 
         final_report = accumulated_state.get("analysis_report", "")
         selected_model = accumulated_state.get("selected_model", "gemini-1.5-flash")
