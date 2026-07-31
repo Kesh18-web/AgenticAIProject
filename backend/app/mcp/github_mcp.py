@@ -105,6 +105,7 @@ def get_github_issues_prs(repo_name: Optional[str] = None, state: str = "open") 
         return {
             "repository": repo_clean,
             "state_filter": state,
+            "total_count": len(issue_results),
             "issues_and_prs": issue_results,
         }
     except Exception as e:
@@ -112,15 +113,7 @@ def get_github_issues_prs(repo_name: Optional[str] = None, state: str = "open") 
         return {
             "repository": repo_clean,
             "state_filter": state,
-            "issues_and_prs": [
-                {
-                    "number": 101,
-                    "title": f"Update compliance documentation in {repo_clean}",
-                    "is_pull_request": True,
-                    "html_url": f"https://github.com/{repo_clean}/pull/101",
-                    "state": state,
-                    "repository": repo_clean,
-                }
-            ],
-            "note": f"Retrieved issue/PR records for repository '{repo_clean}'.",
+            "total_count": 0,
+            "issues_and_prs": [],
+            "error": f"GitHub API Notice: {e}. (Rate limit exceeded or unauthenticated call).",
         }
