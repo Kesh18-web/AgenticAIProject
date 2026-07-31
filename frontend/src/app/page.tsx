@@ -140,36 +140,43 @@ export default function AnalystDashboard() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
+        const parts = buffer.split(/\n\s*\n/);
+        buffer = parts.pop() || "";
 
-        for (const rawLine of lines) {
-          const cleanLine = rawLine.trim();
-          if (cleanLine.startsWith("data: ")) {
-            try {
-              const jsonStr = cleanLine.replace(/^data:\s*/, "");
-              const data = JSON.parse(jsonStr);
-
-              if (data.event === "node_complete") {
-                setActiveNode(data.node);
-                setNodeEvents((prev) => [...prev, data]);
-                if (data.node === "planner" && data.explainability_reason) {
-                  setExplainabilityReason(data.explainability_reason);
-                }
-              } else if (data.event === "hitl_approval_required") {
-                setHitlRequired(true);
-                setExplainabilityReason(data.explainability_reason);
-              } else if (data.event === "complete") {
-                setFinalReport(data.report);
-                setCitations(data.citations || []);
-                setEvalScores(data.eval_scores || null);
-                setCacheHit(data.semantic_cache_hit || false);
-                setMemoryCompacted(data.memory_compacted || false);
-                setTelemetry(data.telemetry || null);
-                setActiveNode("complete");
+        for (const part of parts) {
+          const lines = part.split("\n");
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith("data:")) {
+              const jsonStr = trimmed.replace(/^data:\s*/, "").trim();
+              if (!jsonStr || (!jsonStr.startsWith("{") && !jsonStr.startsWith("["))) {
+                continue;
               }
-            } catch (e) {
-              console.error("Error parsing SSE JSON:", e);
+
+              try {
+                const data = JSON.parse(jsonStr);
+
+                if (data.event === "node_complete") {
+                  setActiveNode(data.node);
+                  setNodeEvents((prev) => [...prev, data]);
+                  if (data.node === "planner" && data.explainability_reason) {
+                    setExplainabilityReason(data.explainability_reason);
+                  }
+                } else if (data.event === "hitl_approval_required") {
+                  setHitlRequired(true);
+                  setExplainabilityReason(data.explainability_reason);
+                } else if (data.event === "complete") {
+                  setFinalReport(data.report);
+                  setCitations(data.citations || []);
+                  setEvalScores(data.eval_scores || null);
+                  setCacheHit(data.semantic_cache_hit || false);
+                  setMemoryCompacted(data.memory_compacted || false);
+                  setTelemetry(data.telemetry || null);
+                  setActiveNode("complete");
+                }
+              } catch (e) {
+                console.error("Error parsing SSE JSON:", e, "jsonStr:", jsonStr);
+              }
             }
           }
         }
