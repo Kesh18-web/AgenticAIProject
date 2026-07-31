@@ -51,8 +51,12 @@ class AnalysisAgent:
                 if replan_count > 0 and critique:
                     critique_instruction = f"\nRE-PLANNING FEEDBACK: A previous draft received low confidence due to the following critique: '{critique}'. Ensure this revised report explicitly addresses these missing evidence gaps!\n"
 
+                long_term_summary = state.get("long_term_summary", "")
+                memory_block = f"\nLong-Term Conversation Memory Summary: {long_term_summary}\n" if long_term_summary else ""
+
                 prompt = (
-                    f"User Query: {query}\n\n"
+                    f"User Query: {query}\n"
+                    f"{memory_block}\n"
                     f"Retrieved Grounded Context Chunks:\n{context_text}\n"
                     f"{critique_instruction}\n"
                     "You are an Enterprise AI Lead Compliance Analyst. Synthesize a comprehensive, executive-ready analysis report.\n"

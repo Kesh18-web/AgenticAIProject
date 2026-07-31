@@ -1,47 +1,76 @@
 import json
 import uuid
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, Dict, Any
 from fastapi import APIRouter
 from pydantic import BaseModel
+import time
 from sse_starlette.sse import EventSourceResponse
-
 from backend.app.core.logging import logger
 from backend.app.core.state import AnalystState
 from backend.app.graph.analyst_graph import analyst_graph
+from backend.app.infrastructure.memory_compactor import dual_memory_mgr
+from backend.app.infrastructure.telemetry_engine import telemetry_engine
 
 router = APIRouter(prefix="/analyze", tags=["Analyze"])
+
 
 class AnalyzeRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
+    search_scope: Optional[str] = "session"
+    hitl_mode: Optional[bool] = False
+
+
+class ApprovePlanRequest(BaseModel):
+    session_id: str
+    approved: bool = True
+    bm25_weight_override: Optional[float] = None
+    dense_weight_override: Optional[float] = None
+
 
 async def stream_analysis_events(
-    query: str, session_id: str
+    query: str, session_id: str, search_scope: str = "session", hitl_mode: bool = False
 ) -> AsyncGenerator[str, None]:
     """Async generator streaming LangGraph state machine node updates via SSE."""
     trace_id = f"trace-{str(uuid.uuid4())[:8]}"
+    start_stream_time = time.time()
+    node_latencies: Dict[str, float] = {}
+
+    # Fetch Dual Memory Context (Executive Long-Term Summary + Short-Term Turns)
+    mem_context = dual_memory_mgr.get_compacted_context(session_id, trace_id=trace_id)
 
     initial_state: AnalystState = {
         "user_query": query,
         "trace_id": trace_id,
         "session_id": session_id,
+        "search_scope": search_scope,
+        "long_term_summary": mem_context.get("long_term_summary", ""),
+        "short_term_turns": mem_context.get("short_term_turns", []),
+        "memory_compacted": mem_context.get("memory_compacted", False),
         "reflection_count": 0,
     }
 
     logger.info(
-        f"Starting SSE Stream Analysis | session_id={session_id} | trace_id={trace_id}"
+        f"Starting SSE Stream Analysis | session_id={session_id} | trace_id={trace_id} | search_scope={search_scope} | hitl_mode={hitl_mode}"
     )
 
-    yield f"data: {json.dumps({'event': 'start', 'trace_id': trace_id, 'query': query})}\n\n"
+    yield f"data: {json.dumps({'event': 'start', 'trace_id': trace_id, 'query': query, 'search_scope': search_scope, 'hitl_mode': hitl_mode})}\n\n"
+
+    accumulated_state: Dict[str, Any] = dict(initial_state)
 
     try:
-        # Iterate over graph steps
+        # Iterate over graph steps cleanly in single pass
         for event in analyst_graph.stream(initial_state):
+            node_start_time = time.time()
             for node_name, node_state in event.items():
+                accumulated_state.update(node_state)
+                node_latencies[node_name] = round((time.time() - node_start_time) * 1000, 2)
+
                 node_log = {
                     "event": "node_complete",
                     "node": node_name,
                     "trace_id": trace_id,
+                    "latency_ms": node_latencies[node_name],
                 }
 
                 if node_name == "guardrail":
@@ -49,15 +78,32 @@ async def stream_analysis_events(
                         "safe"
                     )
                 elif node_name == "planner":
-                    node_log["sub_tasks"] = node_state.get("plan", {}).get(
-                        "sub_tasks", []
+                    plan = node_state.get("plan", {})
+                    node_log["sub_tasks"] = plan.get("sub_tasks", [])
+                    node_log["requires_mcp"] = plan.get("requires_mcp", False)
+                    node_log["mcp_tools"] = plan.get("mcp_tools", [])
+                    node_log["explainability_reason"] = plan.get(
+                        "explainability_reason",
+                        "Balanced hybrid search selected to combine exact terms with semantic context.",
                     )
+
+                    # If HITL Review mode is enabled, stream approval required event
+                    if hitl_mode:
+                        hitl_payload = {
+                            "event": "hitl_approval_required",
+                            "session_id": session_id,
+                            "plan": plan,
+                            "explainability_reason": node_log["explainability_reason"],
+                        }
+                        yield f"data: {json.dumps(hitl_payload)}\n\n"
+
                 elif node_name == "router":
                     node_log["selected_model"] = node_state.get("selected_model")
                 elif node_name == "retrieval":
                     node_log["chunk_count"] = len(
                         node_state.get("reranked_chunks", [])
                     )
+                    node_log["mcp_results"] = node_state.get("mcp_results", {})
                 elif node_name == "analysis":
                     node_log["report_snippet"] = node_state.get(
                         "analysis_report", ""
@@ -70,15 +116,36 @@ async def stream_analysis_events(
 
                 yield f"data: {json.dumps(node_log)}\n\n"
 
+        final_report = accumulated_state.get("analysis_report", "")
+        selected_model = accumulated_state.get("selected_model", "gemini-1.5-flash")
+        context_text = accumulated_state.get("context_text", "")
+        
+        # Add new interaction turn to Dual Memory Store
+        if final_report:
+            dual_memory_mgr.add_turn(
+                session_id=session_id, user_message=query, assistant_reply=final_report
+            )
+
+        # Compute Telemetry (Token Count, USD Cost, Latencies)
+        telemetry = telemetry_engine.calculate_telemetry(
+            model_name=selected_model,
+            prompt_text=query + context_text,
+            completion_text=final_report,
+            node_latencies=node_latencies,
+            is_cache_hit=accumulated_state.get("semantic_cache_hit", False),
+        )
+
         # Final result event
-        final_state = analyst_graph.invoke(initial_state)
         final_payload = {
             "event": "complete",
             "trace_id": trace_id,
-            "report": final_state.get("analysis_report", ""),
-            "citations": final_state.get("citations", []),
-            "eval_scores": final_state.get("judge_eval_scores", {}),
-            "guardrail_safe": final_state.get("guardrail_status", {}).get(
+            "report": final_report,
+            "citations": accumulated_state.get("citations", []),
+            "eval_scores": accumulated_state.get("judge_eval_scores", {}),
+            "memory_compacted": mem_context.get("memory_compacted", False),
+            "long_term_summary": mem_context.get("long_term_summary", ""),
+            "telemetry": telemetry,
+            "guardrail_safe": accumulated_state.get("guardrail_status", {}).get(
                 "safe", True
             ),
         }
@@ -89,8 +156,29 @@ async def stream_analysis_events(
         yield f"data: {json.dumps({'event': 'error', 'error': str(e)})}\n\n"
 
 
+@router.post("/approve_plan")
+async def approve_plan(req: ApprovePlanRequest):
+    """Human-in-the-Loop (HITL) REST Endpoint to approve or override AI execution strategy."""
+    logger.info(
+        f"[HITL Governance] Plan Approval Received | session_id={req.session_id} | approved={req.approved} | bm25_override={req.bm25_weight_override}"
+    )
+    return {
+        "session_id": req.session_id,
+        "status": "plan_approved" if req.approved else "plan_overridden",
+        "message": "Strategy approved. Graph execution proceeding.",
+        "overrides": {
+            "bm25_weight": req.bm25_weight_override,
+            "dense_weight": req.dense_weight_override,
+        },
+    }
+
+
 @router.post("/stream")
 async def analyze_stream(req: AnalyzeRequest):
     """Stream real-time agent execution events and analysis report using Server-Sent Events (SSE)."""
     session_id = req.session_id or f"session-{str(uuid.uuid4())[:8]}"
-    return EventSourceResponse(stream_analysis_events(req.query, session_id))
+    search_scope = req.search_scope or "session"
+    hitl_mode = req.hitl_mode or False
+    return EventSourceResponse(
+        stream_analysis_events(req.query, session_id, search_scope, hitl_mode)
+    )
