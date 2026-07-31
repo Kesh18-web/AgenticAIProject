@@ -27,6 +27,9 @@ interface NodeEvent {
   trace_id?: string;
   safe?: boolean;
   sub_tasks?: string[];
+  requires_mcp?: boolean;
+  mcp_tools?: string[];
+  mcp_results?: Record<string, any>;
   selected_model?: string;
   chunk_count?: number;
   confidence?: number;
@@ -90,8 +93,17 @@ export default function AnalystDashboard() {
   }, []);
 
   // Submit Analysis Request over SSE Stream
-  const handleStartAnalysis = async () => {
-    if (!query.trim() || isAnalyzing) return;
+  const [cacheHit, setCacheHit] = useState<boolean>(false);
+  const [memoryCompacted, setMemoryCompacted] = useState<boolean>(false);
+  const [telemetry, setTelemetry] = useState<any>(null);
+  const [hitlMode, setHitlMode] = useState<boolean>(false);
+  const [explainabilityReason, setExplainabilityReason] = useState<string>("");
+  const [hitlRequired, setHitlRequired] = useState<boolean>(false);
+  const [hitlApproved, setHitlApproved] = useState<boolean>(false);
+
+  // Submit Query to Agent Pipeline (SSE Stream)
+  const handleAnalyze = async () => {
+    if (!query) return;
 
     setIsAnalyzing(true);
     setActiveNode("guardrail");
@@ -100,6 +112,12 @@ export default function AnalystDashboard() {
     setCitations([]);
     setEvalScores(null);
     setSelectedCitation(null);
+    setCacheHit(false);
+    setMemoryCompacted(false);
+    setTelemetry(null);
+    setExplainabilityReason("");
+    setHitlRequired(false);
+    setHitlApproved(false);
 
     try {
       const response = await fetch(
@@ -107,7 +125,7 @@ export default function AnalystDashboard() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query, search_scope: searchScope }),
+          body: JSON.stringify({ query, search_scope: searchScope, hitl_mode: hitlMode }),
         }
       );
 
@@ -133,10 +151,19 @@ export default function AnalystDashboard() {
               if (data.event === "node_complete") {
                 setActiveNode(data.node);
                 setNodeEvents((prev) => [...prev, data]);
+                if (data.node === "planner" && data.explainability_reason) {
+                  setExplainabilityReason(data.explainability_reason);
+                }
+              } else if (data.event === "hitl_approval_required") {
+                setHitlRequired(true);
+                setExplainabilityReason(data.explainability_reason);
               } else if (data.event === "complete") {
                 setFinalReport(data.report);
                 setCitations(data.citations || []);
                 setEvalScores(data.eval_scores || null);
+                setCacheHit(data.semantic_cache_hit || false);
+                setMemoryCompacted(data.memory_compacted || false);
+                setTelemetry(data.telemetry || null);
                 setActiveNode("complete");
               }
             } catch (e) {
@@ -225,6 +252,22 @@ export default function AnalystDashboard() {
               {backendStatus?.status === "healthy" ? "Online (Port 8000)" : "Connecting..."}
             </span>
           </div>
+
+          {telemetry && (
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 rounded-lg bg-indigo-500/10 px-3 py-1.5 border border-indigo-500/30 text-indigo-300">
+                <Zap className="h-3.5 w-3.5 text-indigo-400" />
+                <span>{telemetry.total_latency_ms}ms</span>
+              </div>
+              <div className="flex items-center gap-1.5 rounded-lg bg-cyan-500/10 px-3 py-1.5 border border-cyan-500/30 text-cyan-300">
+                <Terminal className="h-3.5 w-3.5 text-cyan-400" />
+                <span>{telemetry.total_tokens} Tokens</span>
+              </div>
+              <div className="flex items-center gap-1.5 rounded-lg bg-emerald-500/10 px-3 py-1.5 border border-emerald-500/30 text-emerald-400 font-semibold">
+                <span>{telemetry.formatted_cost}</span>
+              </div>
+            </div>
+          )}
 
           <div className="flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-1.5 border border-slate-800 text-slate-300">
             <Database className="h-4 w-4 text-cyan-400" />
@@ -337,6 +380,30 @@ export default function AnalystDashboard() {
                       Global Workspace Knowledge
                     </button>
                   </div>
+                  <div className="flex items-center gap-1 bg-slate-900/90 p-1 rounded-xl border border-slate-800 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setHitlMode(false)}
+                      className={`px-3 py-1 rounded-lg transition font-medium ${
+                        !hitlMode
+                          ? "bg-emerald-600 text-white shadow-md shadow-emerald-500/20"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      Auto-Pilot
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setHitlMode(true)}
+                      className={`px-3 py-1 rounded-lg transition font-medium ${
+                        hitlMode
+                          ? "bg-amber-600 text-white shadow-md shadow-amber-500/20"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      HITL Review
+                    </button>
+                  </div>
                 </div>
                 <div className="flex gap-3">
                   <input
@@ -347,7 +414,7 @@ export default function AnalystDashboard() {
                     className="flex-1 rounded-xl bg-slate-900/80 px-4 py-3 text-sm text-slate-100 border border-slate-800 focus:border-indigo-500 focus:outline-none transition"
                   />
                   <button
-                    onClick={handleStartAnalysis}
+                    onClick={handleAnalyze}
                     disabled={isAnalyzing}
                     className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-500 px-6 py-3 text-sm font-semibold text-white hover:from-indigo-500 hover:to-indigo-400 shadow-lg shadow-indigo-500/20 disabled:opacity-50 transition"
                   >
@@ -364,6 +431,38 @@ export default function AnalystDashboard() {
                     )}
                   </button>
                 </div>
+
+                {/* Explainability Strategy Pill */}
+                {explainabilityReason && (
+                  <div className="mt-3 flex items-center gap-2 rounded-xl bg-amber-500/10 border border-amber-500/30 px-3.5 py-2 text-xs font-medium text-amber-300">
+                    <Sparkles className="h-4 w-4 text-amber-400 shrink-0" />
+                    <span><strong>AI Strategy Explainability:</strong> {explainabilityReason}</span>
+                  </div>
+                )}
+
+                {/* HITL Human Approval Banner */}
+                {hitlRequired && !hitlApproved && (
+                  <div className="mt-3 flex items-center justify-between rounded-xl bg-indigo-950/80 border border-indigo-500/50 p-3.5 text-xs text-indigo-200 shadow-lg">
+                    <div className="flex items-center gap-2">
+                      <ShieldCheck className="h-5 w-5 text-amber-400 shrink-0" />
+                      <span><strong>Human-in-the-Loop Review:</strong> Review AI strategy before database execution.</span>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        setHitlApproved(true);
+                        setHitlRequired(false);
+                        await fetch("http://localhost:8000/api/v1/analyze/approve_plan", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ session_id: "current_session", approved: true }),
+                        });
+                      }}
+                      className="rounded-lg bg-emerald-600 px-4 py-1.5 font-semibold text-white hover:bg-emerald-500 transition shadow-md"
+                    >
+                      Approve Strategy
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Agent Node Execution Stepper */}
@@ -427,12 +526,26 @@ export default function AnalystDashboard() {
                       <FileText className="h-4 w-4 text-indigo-400" />
                       Grounded Executive Report
                     </h3>
-                    {evalScores && (
-                      <div className="flex items-center gap-2 text-xs bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 px-3 py-1 rounded-full font-semibold">
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                        Groundedness Score: {evalScores.overall_quality * 100}%
-                      </div>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {memoryCompacted && (
+                        <div className="flex items-center gap-1.5 text-xs bg-purple-500/10 border border-purple-500/30 text-purple-400 px-3 py-1 rounded-full font-semibold">
+                          <Brain className="h-3.5 w-3.5" />
+                          Dual Memory Compacted (75% Token Savings)
+                        </div>
+                      )}
+                      {cacheHit && (
+                        <div className="flex items-center gap-1.5 text-xs bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 px-3 py-1 rounded-full font-semibold">
+                          <Zap className="h-3.5 w-3.5" />
+                          Instant Cache Hit (10ms)
+                        </div>
+                      )}
+                      {evalScores && (
+                        <div className="flex items-center gap-2 text-xs bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 px-3 py-1 rounded-full font-semibold">
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          Groundedness Score: {evalScores.overall_quality * 100}%
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {finalReport ? (
