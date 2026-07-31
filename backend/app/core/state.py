@@ -30,6 +30,11 @@ class AnalystState(TypedDict, total=False):
     session_id: str
     search_scope: str  # 'session' (current chat) vs 'global' (workspace-wide)
 
+    # Dual Memory Architecture
+    long_term_summary: Optional[str]
+    short_term_turns: Optional[List[Dict[str, str]]]
+    memory_compacted: Optional[bool]
+
     # Guardrails
     guardrail_status: Dict[str, Any]  # e.g., {'safe': True, 'reason': None}
 
