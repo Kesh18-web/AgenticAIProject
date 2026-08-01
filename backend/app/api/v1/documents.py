@@ -1,3 +1,4 @@
+import io
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -8,6 +9,7 @@ from backend.app.core.logging import logger
 from backend.app.db.bm25 import bm25_mgr
 from backend.app.db.firestore import firestore_db
 from backend.app.db.qdrant import qdrant_store
+from backend.app.infrastructure.embedding_engine import embedding_engine
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -29,7 +31,6 @@ async def index_document(req: DocumentUploadRequest):
         raw_paragraphs = [p.strip() for p in req.content.split("\n\n") if p.strip()]
 
         chunks: List[Dict[str, Any]] = []
-        dummy_embeddings: List[List[float]] = []
 
         for idx, para in enumerate(raw_paragraphs):
             chunk = {
@@ -43,9 +44,12 @@ async def index_document(req: DocumentUploadRequest):
             }
             chunks.append(chunk)
 
-            # Generate vector embedding (using deterministic test representation or model)
-            emb = [0.01 * ((i + idx) % 100 + 1) for i in range(384)]
-            dummy_embeddings.append(emb)
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No readable text extracted from document.")
+
+        # Generate real 384-dim semantic embeddings for all chunks
+        chunk_texts = [c["text"] for c in chunks]
+        embeddings = embedding_engine.embed_batch(chunk_texts)
 
         # 1. Index into BM25 Keyword Store
         bm25_mgr.index_chunks(chunks)
@@ -54,7 +58,7 @@ async def index_document(req: DocumentUploadRequest):
         qdrant_store.upsert_chunks(
             collection_name="enterprise_documents",
             chunks=chunks,
-            embeddings=dummy_embeddings,
+            embeddings=embeddings,
         )
 
         # 3. Persist Document Metadata into GCP Firestore
@@ -94,16 +98,100 @@ async def upload_file(
     """Upload raw PDF or text document file, extract content, and index into hybrid search stores."""
     try:
         content_bytes = await file.read()
-        text_content = content_bytes.decode("utf-8", errors="ignore")
         doc_title = title or file.filename or "Uploaded Document"
+        filename_lower = (file.filename or "").lower()
 
-        req = DocumentUploadRequest(
-            title=doc_title,
-            content=text_content,
-            source_name=file.filename or "Uploaded File",
-            session_id=session_id,
+        chunks: List[Dict[str, Any]] = []
+        doc_id = f"doc_{str(uuid.uuid4())[:8]}"
+
+        if filename_lower.endswith(".pdf"):
+            try:
+                import pypdf
+                pdf_reader = pypdf.PdfReader(io.BytesIO(content_bytes))
+                chunk_counter = 0
+
+                for page_idx, page in enumerate(pdf_reader.pages):
+                    page_text = page.extract_text() or ""
+                    paragraphs = [p.strip() for p in page_text.split("\n\n") if p.strip()]
+                    if not paragraphs and page_text.strip():
+                        paragraphs = [page_text.strip()]
+
+                    for para in paragraphs:
+                        chunk = {
+                            "chunk_id": f"{doc_id}_{chunk_counter}",
+                            "doc_id": doc_id,
+                            "source_name": file.filename or "Uploaded File",
+                            "session_id": session_id,
+                            "page_number": page_idx + 1,
+                            "chunk_index": chunk_counter,
+                            "text": para,
+                        }
+                        chunks.append(chunk)
+                        chunk_counter += 1
+            except Exception as pdf_err:
+                logger.error(f"pypdf extraction failed for {file.filename}: {pdf_err}")
+                raise HTTPException(status_code=400, detail=f"Failed to parse PDF file: {pdf_err}")
+        else:
+            # Plain text / markdown fallback
+            text_content = content_bytes.decode("utf-8", errors="ignore")
+            raw_paragraphs = [p.strip() for p in text_content.split("\n\n") if p.strip()]
+            for idx, para in enumerate(raw_paragraphs):
+                chunk = {
+                    "chunk_id": f"{doc_id}_{idx}",
+                    "doc_id": doc_id,
+                    "source_name": file.filename or "Uploaded File",
+                    "session_id": session_id,
+                    "page_number": 1,
+                    "chunk_index": idx,
+                    "text": para,
+                }
+                chunks.append(chunk)
+
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No readable text content extracted from file.")
+
+        # Generate real 384-dim semantic embeddings for all chunks
+        chunk_texts = [c["text"] for c in chunks]
+        embeddings = embedding_engine.embed_batch(chunk_texts)
+
+        # 1. Index into BM25 Keyword Store
+        bm25_mgr.index_chunks(chunks)
+
+        # 2. Index into Qdrant Vector Store
+        qdrant_store.upsert_chunks(
+            collection_name="enterprise_documents",
+            chunks=chunks,
+            embeddings=embeddings,
         )
-        return await index_document(req)
+
+        # 3. Persist Document Metadata into GCP Firestore
+        firestore_db.save_document(
+            collection_name="uploaded_documents",
+            doc_id=doc_id,
+            data={
+                "doc_id": doc_id,
+                "title": doc_title,
+                "source_name": file.filename or "Uploaded File",
+                "session_id": session_id,
+                "chunks_indexed": len(chunks),
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        )
+
+        logger.info(
+            f"Successfully uploaded & indexed '{doc_title}' ({len(chunks)} chunks, session={session_id}) into BM25, Qdrant & Firestore"
+        )
+        return {
+            "status": "success",
+            "doc_id": doc_id,
+            "title": doc_title,
+            "filename": file.filename,
+            "chunks_indexed": len(chunks),
+            "session_id": session_id,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error handling file upload '{file.filename}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
+
