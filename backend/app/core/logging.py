@@ -15,12 +15,21 @@ def serialize_log(record: Dict[str, Any]) -> str:
 
     duration_str = f" [{duration_ms:.2f}ms]" if duration_ms is not None else ""
 
+    func_name = str(record["function"]).replace("<", "\\<").replace(">", "\\>")
+    msg = (
+        str(record["message"])
+        .replace("<", "\\<")
+        .replace(">", "\\>")
+        .replace("{", "{{")
+        .replace("}", "}}")
+    )
+
     return (
         f"<green>{record['time']:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
         f"<level>{record['level']:<8}</level> | "
         f"<cyan>trace_id={trace_id}</cyan> | "
-        f"<cyan>{record['name']}:{record['function']}:{record['line']}</cyan>{duration_str} - "
-        f"<level>{record['message']}</level>\n"
+        f"<cyan>{record['name']}:{func_name}:{record['line']}</cyan>{duration_str} - "
+        f"<level>{msg}</level>\n"
     )
 
 
