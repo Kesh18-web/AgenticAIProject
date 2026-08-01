@@ -45,7 +45,7 @@ class QdrantVectorStoreManager:
     def ensure_collection(
         self, collection_name: str, vector_size: int = 384
     ) -> bool:
-        """Create Qdrant collection if it does not exist."""
+        """Create Qdrant collection if it does not exist, and ensure payload index on session_id."""
         if not self.client:
             return False
 
@@ -63,6 +63,23 @@ class QdrantVectorStoreManager:
                 logger.info(
                     f"Created Qdrant collection '{collection_name}' (dim={vector_size})"
                 )
+
+            # Always ensure the session_id payload index exists (idempotent)
+            try:
+                self.client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name="session_id",
+                    field_schema=qmodels.PayloadSchemaType.KEYWORD,
+                )
+                logger.info(
+                    f"Ensured payload index on 'session_id' for collection '{collection_name}'"
+                )
+            except Exception as idx_err:
+                # Index may already exist — not an error
+                logger.debug(
+                    f"Payload index on 'session_id' already exists or could not be created: {idx_err}"
+                )
+
             return True
         except Exception as e:
             logger.error(
@@ -119,23 +136,35 @@ class QdrantVectorStoreManager:
         query_embedding: List[float],
         limit: int = 10,
         session_id: Optional[str] = None,
+        session_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """Perform dense vector search in Qdrant with optional session_id filtering."""
+        """Perform dense vector search in Qdrant with optional session_id / session_ids filtering."""
         if not self.client:
             return []
 
         try:
-            # Build Qdrant payload filter if session_id is provided
+            # Build Qdrant payload filter if session_id / session_ids provided
             query_filter = None
-            if session_id and HAS_QDRANT_LIB:
-                query_filter = qmodels.Filter(
-                    must=[
-                        qmodels.FieldCondition(
-                            key="session_id",
-                            match=qmodels.MatchValue(value=session_id),
-                        )
-                    ]
-                )
+            if HAS_QDRANT_LIB:
+                if session_ids:
+                    query_filter = qmodels.Filter(
+                        should=[
+                            qmodels.FieldCondition(
+                                key="session_id",
+                                match=qmodels.MatchValue(value=s),
+                            )
+                            for s in session_ids
+                        ]
+                    )
+                elif session_id:
+                    query_filter = qmodels.Filter(
+                        must=[
+                            qmodels.FieldCondition(
+                                key="session_id",
+                                match=qmodels.MatchValue(value=session_id),
+                            )
+                        ]
+                    )
 
             if hasattr(self.client, "query_points"):
                 response = self.client.query_points(
