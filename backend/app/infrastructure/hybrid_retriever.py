@@ -63,12 +63,13 @@ class HybridRetriever:
         dense_weight: float = 0.5,
         bm25_weight: float = 0.5,
         session_id: Optional[str] = None,
+        session_ids: Optional[List[str]] = None,
         trace_id: str = "N/A",
     ) -> List[Dict[str, Any]]:
         """Retrieve and rank candidates using hybrid dense vector search + BM25 keyword search + Weighted RRF."""
         with logger_timer("HybridRetriever: Weighted Search & Fusion", trace_id=trace_id) as log:
             log.info(
-                f"Executing weighted hybrid retrieval for query: '{query}' | dense_weight={dense_weight:.2f} | bm25_weight={bm25_weight:.2f} | session_id={session_id}"
+                f"Executing weighted hybrid retrieval for query: '{query}' | dense_weight={dense_weight:.2f} | bm25_weight={bm25_weight:.2f} | session_id={session_id} | session_ids={session_ids}"
             )
 
             # 1. Execute Dense Vector Search with Session Filter
@@ -79,11 +80,12 @@ class HybridRetriever:
                     query_embedding=query_embedding,
                     limit=top_k * 2,
                     session_id=session_id,
+                    session_ids=session_ids,
                 )
 
             # 2. Execute BM25 Keyword Search with Session Filter
             bm25_hits = self.bm25_mgr.search_bm25(
-                query=query, top_k=top_k * 2, session_id=session_id
+                query=query, top_k=top_k * 2, session_id=session_id, session_ids=session_ids
             )
 
             # 3. Fuse via Weighted Reciprocal Rank Fusion (Weighted RRF)

@@ -13,6 +13,7 @@ from backend.app.db.qdrant import qdrant_store
 from backend.app.infrastructure.cache_engine import retrieval_cache, semantic_cache
 from backend.app.infrastructure.citation_engine import citation_engine
 from backend.app.infrastructure.context_builder import context_builder
+from backend.app.infrastructure.embedding_engine import embedding_engine
 from backend.app.infrastructure.hybrid_retriever import HybridRetriever
 from backend.app.infrastructure.query_rewriter import query_rewriter
 from backend.app.infrastructure.reranker import cross_encoder_reranker
@@ -50,7 +51,12 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
 
     # Determine search scope: Read user explicit selection directly from state ('session' default vs 'global')
     search_scope = state.get("search_scope", "session")
-    session_filter = session_id if search_scope == "session" else None
+    if search_scope == "global":
+        session_filter = None
+        target_session_ids = [session_id, "global_workspace"]
+    else:
+        session_filter = session_id
+        target_session_ids = None
 
     # Check Tier-1 Retrieval Cache
     cached_retrieval = retrieval_cache.get(query, session_id, search_scope)
@@ -101,12 +107,9 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
     # Deduplicate search targets while preserving order
     unique_search_targets = list(dict.fromkeys(search_queries))
 
-    # Determine search scope: Read user explicit selection directly from state ('session' default vs 'global')
-    search_scope = state.get("search_scope", "session")
-    session_filter = state.get("session_id") if search_scope == "session" else None
-
     # 2. Retrieve via Dynamic Weighted Hybrid RRF across ALL sub-task & query targets
-    dummy_query_emb = [0.01 * (i + 1) for i in range(384)]
+    # Embed original query once — used for all retrieval targets
+    query_embedding = embedding_engine.embed(query)
     all_retrieved_chunks = []
     seen_keys = set()
 
@@ -114,11 +117,12 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
         sub_hits = hybrid_retriever.retrieve_hybrid(
             collection_name="enterprise_documents",
             query=target_q,
-            query_embedding=dummy_query_emb,
+            query_embedding=query_embedding,
             top_k=top_k,
             dense_weight=dense_weight,
             bm25_weight=bm25_weight,
             session_id=session_filter,
+            session_ids=target_session_ids,
             trace_id=trace_id,
         )
         for chunk in sub_hits:
@@ -157,9 +161,9 @@ def analysis_node(state: AnalystState) -> Dict[str, Any]:
     trace_id = state.get("trace_id", "N/A")
     reranked_chunks = state.get("reranked_chunks", [])
 
-    # Check Tier-2 Semantic Cosine Cache (10ms instant return for conceptual matches)
-    dummy_query_emb = [0.01 * (i + 1) for i in range(384)]
-    cached_semantic = semantic_cache.get(dummy_query_emb, trace_id=trace_id)
+    # Generate real query embedding for semantic cache lookup
+    query_embedding = embedding_engine.embed(query)
+    cached_semantic = semantic_cache.get(query_embedding, trace_id=trace_id)
     if cached_semantic:
         return cached_semantic
 
@@ -182,7 +186,7 @@ def analysis_node(state: AnalystState) -> Dict[str, Any]:
     }
 
     # Store synthesized report into Tier-2 Semantic Cosine Cache
-    semantic_cache.set(dummy_query_emb, result_payload)
+    semantic_cache.set(query_embedding, result_payload)
     return result_payload
 
 
