@@ -434,6 +434,7 @@ export default function AnalystDashboard() {
       setIndexingStatus(
         `✅ Indexed '${data.title}' into Global Workspace Knowledge Base (ID: ${data.doc_id}, Chunks: ${data.chunks_indexed})`
       );
+      showToast("Document uploaded successfully");
       setDocTitle("");
       setDocSource("");
       setDocContent("");
@@ -467,9 +468,9 @@ export default function AnalystDashboard() {
 
   return (
     <div className="flex h-screen flex-col bg-[#090d16] text-slate-100 overflow-hidden relative">
-      {/* 2-Second Top Toast Notification */}
+      {/* 2-Second Top Right Toast Notification */}
       {toastMessage && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white shadow-xl border border-emerald-400/30 animate-bounce">
+        <div className="absolute top-4 right-6 z-50 flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-semibold text-white shadow-xl border border-emerald-400/30 animate-bounce">
           <Check className="h-4 w-4" />
           <span>{toastMessage}</span>
         </div>
@@ -993,6 +994,7 @@ export default function AnalystDashboard() {
                           if (!res.ok) throw new Error("Upload failed");
                           const data = await res.json();
                           setIndexingStatus(`✅ Indexed '${data.filename || data.title}' into Global Workspace Knowledge! (Chunks: ${data.chunks_indexed})`);
+                          showToast("Document uploaded successfully");
                         } catch (err: any) {
                           setIndexingStatus(`Error: ${err.message || err}`);
                         } finally {
