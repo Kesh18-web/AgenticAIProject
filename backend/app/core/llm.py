@@ -49,6 +49,7 @@ def get_llm(
                 google_api_key=settings.GEMINI_API_KEY,
                 temperature=temperature,
                 max_output_tokens=max_tokens,
+                max_retries=1,
             )
             # Attach Groq as auto-fallback if Gemini hits 429 rate limits or errors
             if groq_llm:

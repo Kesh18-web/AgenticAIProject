@@ -20,8 +20,24 @@ class PlannerAgent:
         with logger_timer("PlannerAgent: Live LLM Task Decomposition", trace_id=trace_id) as log:
             log.info(f"Invoking Live LLM Planner for query: '{query}' (replan_count={replan_count})")
 
+            # Build conversation history from short-term memory so planner can classify follow-ups correctly
+            short_term_turns = state.get("short_term_turns", []) or []
+            if short_term_turns:
+                history_lines = []
+                for turn in short_term_turns:
+                    history_lines.append(f"User: {turn.get('user', '')}")
+                    history_lines.append(f"Assistant: {turn.get('assistant', '')[:200]}")
+                conversation_history_block = (
+                    "\nRecent Conversation History:\n"
+                    + "\n".join(history_lines)
+                    + "\n"
+                )
+            else:
+                conversation_history_block = ""
+
             # Construct system & user prompt for live LLM planning
             prompt = (
+                f"{conversation_history_block}"
                 f"User Inquiry: {query}\n"
                 f"Long-Term Conversation Memory Summary: {long_term_summary if long_term_summary else 'None (New Conversation)'}\n"
                 f"Re-plan Iteration: {replan_count}\n"
@@ -29,7 +45,7 @@ class PlannerAgent:
                 "You are an Enterprise AI Lead Analyst. Deconstruct this inquiry into a structured JSON execution plan following these explicit rules:\n\n"
                 "1. requires_rag:\n"
                 "   - Set to true if inquiry requires internal company policies, compliance documents, SOC2 standards, or uploaded files.\n"
-                "   - Set to false only for generic greetings or pure general knowledge.\n\n"
+                "   - Set to false for generic greetings, personal follow-up questions (e.g. 'what is my name?', 'what did I say earlier?'), or pure general knowledge.\n\n"
                 "2. requires_mcp & mcp_tools:\n"
                 "   - Set requires_mcp to true IF query requires web search, server file listing/reading, or GitHub repository inspection.\n"
                 "   - Populate mcp_tools with items from ['browser_search', 'fs_list_files', 'fs_read_file', 'github_code_search', 'github_issues_search'].\n"
@@ -41,7 +57,7 @@ class PlannerAgent:
                 "   - Ensure bm25_weight + dense_weight = 1.0.\n\n"
                 "4. sub_tasks & explainability_reason:\n"
                 "   - Break down the inquiry into 2-4 logical sub-tasks.\n"
-                "   - Generate a 1-sentence 'explainability_reason' stating clearly WHY this search mode, weights, and tools were selected (e.g., 'Favored BM25 (80%) because exact rule code SOC2 3.1 was detected.').\n\n"
+                "   - Generate a 1-sentence 'explainability_reason' stating clearly WHY this search mode, weights, and tools were selected.\n\n"
                 "Return ONLY a valid JSON object matching this schema:\n"
                 "{\n"
                 '  "requires_rag": true,\n'

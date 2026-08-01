@@ -57,7 +57,18 @@ class GuardrailAgent:
                 logger.error(f"Failed to compile PII regex [{rule.get('type')}]: {e}")
 
     def _classify_intent_with_llm(self, query: str) -> Dict[str, Any]:
-        """Fast Layer-2 LLM Intent Classifier checking semantic adversarial intent via live Gemini/Groq LLM."""
+        """Fast Layer-2 LLM Intent Classifier checking semantic adversarial intent."""
+        suspicious_words = [
+            "bypass", "override", "jailbreak", "exploit", "unrestricted",
+            "ignore previous", "system prompt", "dan mode", "act as", "eval("
+        ]
+        has_suspicious = any(w in query.lower() for w in suspicious_words)
+
+        # Fast-path safe queries (greetings, standard policy questions) in 0.1ms
+        if not has_suspicious:
+            return {"flagged": False, "reason": None, "confidence": 0.99}
+
+        # If query contains suspicious adversarial phrases, invoke LLM classifier
         try:
             from backend.app.core.llm import get_llm
 
@@ -86,12 +97,10 @@ class GuardrailAgent:
             }
         except Exception as e:
             logger.warning(f"Live LLM Guardrail Classifier fallback: {e}")
-            suspicious_words = ["bypass", "override", "jailbreak", "exploit", "unrestricted"]
-            has_suspicious = any(w in query.lower() for w in suspicious_words)
             return {
-                "flagged": has_suspicious,
-                "reason": "Layer-2 Classifier: Suspicious adversarial query intent detected." if has_suspicious else None,
-                "confidence": 0.88 if has_suspicious else 0.99,
+                "flagged": True,
+                "reason": "Layer-2 Classifier: Suspicious adversarial query intent detected.",
+                "confidence": 0.88,
             }
 
     def check_input(self, state: AnalystState) -> Dict[str, Any]:

@@ -22,13 +22,30 @@ class AnalysisAgent:
         with logger_timer("AnalysisAgent: Report Synthesis", trace_id=trace_id) as log:
             log.info(f"Synthesizing report using model [{selected_model}] (requires_rag={requires_rag}, replan_count={replan_count})...")
 
+            # Build recent conversation history block from short-term working memory
+            short_term_turns = state.get("short_term_turns", []) or []
+            if short_term_turns:
+                history_lines = []
+                for turn in short_term_turns:
+                    history_lines.append(f"User: {turn.get('user', '')}")
+                    history_lines.append(f"Assistant: {turn.get('assistant', '')[:300]}")
+                conversation_history_block = (
+                    "\nRecent Conversation History (use this to recall prior context, user names, preferences, and established facts):\n"
+                    + "\n".join(history_lines)
+                    + "\n"
+                )
+            else:
+                conversation_history_block = ""
+
             # 1. Direct General Knowledge Bypass (when query doesn't require RAG documents)
             if not requires_rag:
                 try:
                     llm = get_llm(model_name=selected_model, temperature=0.3)
                     prompt = (
+                        f"{conversation_history_block}"
                         f"User Inquiry: {query}\n\n"
-                        "You are an Enterprise AI Assistant. Provide a clear, comprehensive, accurate, and direct response to the user inquiry based on general knowledge."
+                        "You are an Enterprise AI Assistant. Use the conversation history above (if any) to recall prior context such as the user's name, preferences, or facts they shared. "
+                        "Provide a clear, comprehensive, accurate, and direct response to the user inquiry."
                     )
                     response = llm.invoke(prompt)
                     report_text = str(response.content).strip()
@@ -55,11 +72,13 @@ class AnalysisAgent:
                 memory_block = f"\nLong-Term Conversation Memory Summary: {long_term_summary}\n" if long_term_summary else ""
 
                 prompt = (
+                    f"{conversation_history_block}"
                     f"User Query: {query}\n"
                     f"{memory_block}\n"
                     f"Retrieved Grounded Context Chunks:\n{context_text}\n"
                     f"{critique_instruction}\n"
-                    "You are an Enterprise AI Lead Compliance Analyst. Synthesize a comprehensive, executive-ready analysis report.\n"
+                    "You are an Enterprise AI Lead Compliance Analyst. Use the conversation history above (if any) to recall prior context such as the user's name or established facts. "
+                    "Synthesize a comprehensive, executive-ready analysis report.\n"
                     "Mandatory Guidelines:\n"
                     "1. Ground every claim directly in the provided context chunks.\n"
                     "2. Use inline footnote citations like [Doc 1], [Doc 2] corresponding to the chunk numbers.\n"
