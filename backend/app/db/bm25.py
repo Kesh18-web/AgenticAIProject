@@ -28,25 +28,33 @@ class BM25Indexer:
         self.corpus_tokens: List[List[str]] = []
         self.load_from_disk()
 
-    def index_chunks(self, chunks: List[Dict[str, Any]]) -> bool:
-        """Index a list of text chunks using Rank-BM25 Okapi algorithm and persist to disk."""
+    def index_chunks(self, new_chunks: List[Dict[str, Any]]) -> bool:
+        """Index text chunks using Rank-BM25 Okapi algorithm, appending to existing chunks and persisting to disk."""
         if not HAS_BM25_LIB:
             logger.warning("rank_bm25 library not available. BM25 indexing skipped.")
             return False
 
-        if not chunks:
+        if not new_chunks:
             logger.warning("No chunks provided to BM25 indexer.")
             return False
 
-        self.chunks = chunks
-        self.corpus_tokens = [
-            tokenize_text(chunk.get("text", "")) for chunk in chunks
-        ]
+        # Existing chunk IDs set for deduplication
+        existing_ids = {c.get("chunk_id") for c in self.chunks if c.get("chunk_id")}
+        added_count = 0
+
+        for chunk in new_chunks:
+            c_id = chunk.get("chunk_id")
+            if not c_id or c_id not in existing_ids:
+                self.chunks.append(chunk)
+                self.corpus_tokens.append(tokenize_text(chunk.get("text", "")))
+                added_count += 1
+                if c_id:
+                    existing_ids.add(c_id)
 
         try:
             self.bm25_index = BM25Okapi(self.corpus_tokens)
             logger.info(
-                f"Successfully indexed {len(chunks)} chunks into BM25 Keyword Store."
+                f"Successfully indexed {added_count} new chunks (Total: {len(self.chunks)}) into BM25 Keyword Store."
             )
             self.save_to_disk()
             return True
@@ -85,9 +93,13 @@ class BM25Indexer:
         return False
 
     def search_bm25(
-        self, query: str, top_k: int = 10, session_id: Optional[str] = None
+        self,
+        query: str,
+        top_k: int = 10,
+        session_id: Optional[str] = None,
+        session_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """Search BM25 keyword index and return top_k candidates with BM25 scores and optional session_id filter."""
+        """Search BM25 keyword index and return top_k candidates with BM25 scores and optional session filter."""
         if not self.bm25_index or not self.chunks:
             return []
 
@@ -98,15 +110,18 @@ class BM25Indexer:
         try:
             scores = self.bm25_index.get_scores(query_tokens)
 
+            # Filter session target list
+            target_sessions = set(session_ids) if session_ids else ({session_id} if session_id else None)
+
             # Zip chunks with scores and sort descending
             scored_results = []
             for idx, score in enumerate(scores):
                 if score > 0.0:  # Only return chunks with non-zero keyword match
                     chunk_copy = dict(self.chunks[idx])
                     chunk_sess = chunk_copy.get("session_id")
-                    
-                    # Filter by session_id if specified
-                    if session_id and chunk_sess and chunk_sess != session_id:
+
+                    # Filter by session if specified
+                    if target_sessions and chunk_sess and chunk_sess not in target_sessions:
                         continue
 
                     chunk_copy["score"] = float(score)
