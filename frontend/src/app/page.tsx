@@ -117,13 +117,41 @@ export default function AnalystDashboard() {
   const [chats, setChats] = useState<ChatSession[]>([INITIAL_CHAT]);
   const [activeChatId, setActiveChatId] = useState<string>("session-init-1");
   const activeChat = chats.find((c) => c.id === activeChatId) ?? chats[0];
+  const [isLoadedFromStorage, setIsLoadedFromStorage] = useState(false);
 
-  // Keep activeChatId pointing at the first chat on first render
+  // Load chats from localStorage on client mount
   useEffect(() => {
-    if (!activeChatId && chats.length > 0) {
-      setActiveChatId(chats[0].id);
+    try {
+      const savedChats = localStorage.getItem("enterprise_analyst_chats_v1");
+      const savedActiveId = localStorage.getItem("enterprise_analyst_active_chat_id");
+      if (savedChats) {
+        const parsed: ChatSession[] = JSON.parse(savedChats);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setChats(parsed);
+          if (savedActiveId && parsed.some((c) => c.id === savedActiveId)) {
+            setActiveChatId(savedActiveId);
+          } else {
+            setActiveChatId(parsed[0].id);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Error loading chats from localStorage:", err);
+    } finally {
+      setIsLoadedFromStorage(true);
     }
-  }, [activeChatId, chats]);
+  }, []);
+
+  // Save chats to localStorage whenever chats or activeChatId changes
+  useEffect(() => {
+    if (!isLoadedFromStorage) return;
+    try {
+      localStorage.setItem("enterprise_analyst_chats_v1", JSON.stringify(chats));
+      localStorage.setItem("enterprise_analyst_active_chat_id", activeChatId);
+    } catch (err) {
+      console.error("Error saving chats to localStorage:", err);
+    }
+  }, [chats, activeChatId, isLoadedFromStorage]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
