@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 from backend.app.core.llm import get_llm
 from backend.app.core.logging import logger, logger_timer
+from backend.app.db.firestore import firestore_db
 
 
 class DualMemoryManager:
@@ -13,8 +14,21 @@ class DualMemoryManager:
 
     def _get_or_create_session(self, session_id: str) -> Dict[str, Any]:
         if session_id not in self._session_store:
+            # Hydrate turns from persistent GCP Firestore storage
+            firestore_msgs = firestore_db.get_chat_messages(session_id)
+            turns: List[Dict[str, str]] = []
+            curr_user = ""
+            for msg in firestore_msgs:
+                role = msg.get("role")
+                content = msg.get("content", "")
+                if role == "user":
+                    curr_user = content
+                elif role == "assistant" and curr_user:
+                    turns.append({"user": curr_user, "assistant": content})
+                    curr_user = ""
+
             self._session_store[session_id] = {
-                "turns": [],  # List of {"user": str, "assistant": str}
+                "turns": turns,  # List of {"user": str, "assistant": str}
                 "long_term_summary": "",
                 "compaction_count": 0,
             }
