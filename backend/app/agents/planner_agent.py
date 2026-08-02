@@ -43,20 +43,20 @@ class PlannerAgent:
                 f"Re-plan Iteration: {replan_count}\n"
                 f"Reflection Critique / Gap Notes: {critique if critique else 'None (Initial Pass)'}\n\n"
                 "You are an Enterprise AI Lead Analyst. Deconstruct this inquiry into a structured JSON execution plan following these explicit rules:\n\n"
-                "1. requires_rag:\n"
-                "   - Set to true if inquiry requires internal company policies, compliance documents, SOC2 standards, or uploaded files.\n"
-                "   - Set to false for generic greetings, personal follow-up questions (e.g. 'what is my name?', 'what did I say earlier?'), or pure general knowledge.\n\n"
+                "1. requires_rag Intent Classification:\n"
+                "   - Set to true if the inquiry asks about candidates, people, resumes, work experience, projects, uploaded documents, policies, contracts, or follow-ups referencing prior turns.\n"
+                "   - Set to false ONLY for generic greetings ('hi', 'hello'), pure math, or general coding syntax questions ('how to reverse a string in Python').\n\n"
                 "2. requires_mcp & mcp_tools:\n"
                 "   - Set requires_mcp to true IF query requires web search, server file listing/reading, or GitHub repository inspection.\n"
                 "   - Populate mcp_tools with items from ['browser_search', 'fs_list_files', 'fs_read_file', 'github_code_search', 'github_issues_search'].\n"
                 "   - Extract github_repo string (e.g. 'facebook/react' or 'Kesh18-web/AgenticAIProject') IF user specified a repository name. Otherwise set github_repo to null.\n\n"
                 "3. search_mode & weight tuning:\n"
                 "   - 'exact_keyword': Choose when the query contains exact section numbers, rule codes, or error IDs. Heavily favor BM25 keyword search (set bm25_weight between 0.70 and 0.90, and dense_weight = 1.0 - bm25_weight).\n"
-                "   - 'semantic_conceptual': Choose when the query asks for broad policy summaries or high-level concepts. Heavily favor Dense Vector search (set dense_weight between 0.70 and 0.90, and bm25_weight = 1.0 - dense_weight).\n"
+                "   - 'semantic_conceptual': Choose when the query asks for broad policy summaries, resume overviews, or high-level concepts. Heavily favor Dense Vector search (set dense_weight between 0.70 and 0.90, and bm25_weight = 1.0 - dense_weight).\n"
                 "   - 'hybrid_balanced': Choose for standard compliance inquiries requiring both exact terms and contextual meaning (set bm25_weight=0.50, dense_weight=0.50).\n"
                 "   - Ensure bm25_weight + dense_weight = 1.0.\n\n"
                 "4. sub_tasks & explainability_reason:\n"
-                "   - Break down the inquiry into 2-4 logical sub-tasks.\n"
+                "   - Break down the inquiry into 2-4 logical sub-tasks. Resolve any pronouns in sub-tasks using the recent conversation history.\n"
                 "   - Generate a 1-sentence 'explainability_reason' stating clearly WHY this search mode, weights, and tools were selected.\n\n"
                 "Return ONLY a valid JSON object matching this schema:\n"
                 "{\n"
@@ -64,7 +64,7 @@ class PlannerAgent:
                 '  "requires_mcp": false,\n'
                 '  "mcp_tools": [],\n'
                 '  "github_repo": null,\n'
-                '  "sub_tasks": ["Extract key terms", "Retrieve policy evidence", "Synthesize report"],\n'
+                '  "sub_tasks": ["Extract candidate name and context", "Retrieve project evidence", "Synthesize findings"],\n'
                 '  "search_mode": "hybrid_balanced",\n'
                 '  "bm25_weight": 0.50,\n'
                 '  "dense_weight": 0.50,\n'
@@ -85,7 +85,7 @@ class PlannerAgent:
                     response_text = response_text.replace("```", "").strip()
 
                 plan = json.loads(response_text)
-                log.info(f"Live LLM Plan Generated successfully ({len(plan.get('sub_tasks', []))} sub-tasks, mode={plan.get('search_mode')})")
+                log.info(f"Live LLM Plan Generated successfully ({len(plan.get('sub_tasks', []))} sub-tasks, mode={plan.get('search_mode')}, requires_rag={plan.get('requires_rag')})")
                 return plan
 
             except Exception as e:
