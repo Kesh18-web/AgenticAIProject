@@ -113,45 +113,72 @@ export default function AnalystDashboard() {
     "workbench" | "indexing" | "observability" | "architect"
   >("workbench");
 
-  // ── Chat State ─────────────────────────────────────────────────────────────
+  // ── Chat State (Firestore Backend Sync) ────────────────────────────────────
   const [chats, setChats] = useState<ChatSession[]>([INITIAL_CHAT]);
   const [activeChatId, setActiveChatId] = useState<string>("session-init-1");
   const activeChat = chats.find((c) => c.id === activeChatId) ?? chats[0];
-  const [isLoadedFromStorage, setIsLoadedFromStorage] = useState(false);
 
-  // Load chats from localStorage on client mount
-  useEffect(() => {
+  // Helper to load messages for a specific session from Firestore
+  const loadMessagesForSession = useCallback(async (sessionId: string) => {
+    if (!sessionId || sessionId === "undefined") return;
     try {
-      const savedChats = localStorage.getItem("enterprise_analyst_chats_v1");
-      const savedActiveId = localStorage.getItem("enterprise_analyst_active_chat_id");
-      if (savedChats) {
-        const parsed: ChatSession[] = JSON.parse(savedChats);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setChats(parsed);
-          if (savedActiveId && parsed.some((c) => c.id === savedActiveId)) {
-            setActiveChatId(savedActiveId);
-          } else {
-            setActiveChatId(parsed[0].id);
-          }
+      const res = await fetch(`http://localhost:8000/api/v1/sessions/${sessionId}/messages`).catch(() => null);
+      if (res && res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data && data.messages && Array.isArray(data.messages)) {
+          setChats((prev) =>
+            prev.map((c) => (c.id === sessionId ? { ...c, messages: data.messages } : c))
+          );
         }
       }
     } catch (err) {
-      console.error("Error loading chats from localStorage:", err);
-    } finally {
-      setIsLoadedFromStorage(true);
+      console.warn(`Could not load messages for session [${sessionId}]:`, err);
     }
   }, []);
 
-  // Save chats to localStorage whenever chats or activeChatId changes
+  // Fetch all chat sessions from Firestore API on mount
   useEffect(() => {
-    if (!isLoadedFromStorage) return;
-    try {
-      localStorage.setItem("enterprise_analyst_chats_v1", JSON.stringify(chats));
-      localStorage.setItem("enterprise_analyst_active_chat_id", activeChatId);
-    } catch (err) {
-      console.error("Error saving chats to localStorage:", err);
-    }
-  }, [chats, activeChatId, isLoadedFromStorage]);
+    const fetchSessions = async () => {
+      try {
+        const res = await fetch("http://localhost:8000/api/v1/sessions").catch(() => null);
+        if (res && res.ok) {
+          const data = await res.json().catch(() => null);
+          if (data && data.sessions && Array.isArray(data.sessions) && data.sessions.length > 0) {
+            const validSessions = data.sessions.filter((s: any) => s && s.id && s.id !== "undefined");
+            if (validSessions.length > 0) {
+              const apiSessions: ChatSession[] = validSessions.map((s: any) => ({
+                id: s.id,
+                name: s.name || "Chat",
+                createdAt: s.createdAt || Date.now(),
+                messages: [],
+                searchScope: s.searchScope || "session",
+                attachedFiles: s.attachedFiles || [],
+              }));
+              setChats(apiSessions);
+              const targetId = apiSessions[0].id;
+              setActiveChatId(targetId);
+              loadMessagesForSession(targetId);
+            }
+          } else {
+            // First time setup — seed initial chat in Firestore
+            await fetch("http://localhost:8000/api/v1/sessions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                id: INITIAL_CHAT.id,
+                name: INITIAL_CHAT.name,
+                searchScope: INITIAL_CHAT.searchScope,
+                attachedFiles: INITIAL_CHAT.attachedFiles,
+              }),
+            }).catch(() => null);
+          }
+        }
+      } catch (err) {
+        console.warn("Firestore API offline or loading:", err);
+      }
+    };
+    fetchSessions();
+  }, [loadMessagesForSession]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -202,12 +229,21 @@ export default function AnalystDashboard() {
     []
   );
 
-  const toggleSearchScope = () => {
+  const toggleSearchScope = async () => {
     const nextScope = activeChat.searchScope === "session" ? "global" : "session";
     updateChat(activeChat.id, (c) => ({ ...c, searchScope: nextScope }));
+    try {
+      await fetch(`http://localhost:8000/api/v1/sessions/${activeChat.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ searchScope: nextScope }),
+      });
+    } catch (err) {
+      console.error("Error updating searchScope in Firestore:", err);
+    }
   };
 
-  const addNewChat = () => {
+  const addNewChat = async () => {
     const n = chats.length + 1;
     const chat = createChat(`Chat ${n}`);
     setChats((prev) => [...prev, chat]);
@@ -218,9 +254,24 @@ export default function AnalystDashboard() {
     setLatestTelemetry(null);
     setRunningExplainabilityReason("");
     setHitlRequired(false);
+
+    try {
+      await fetch("http://localhost:8000/api/v1/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: chat.id,
+          name: chat.name,
+          searchScope: chat.searchScope,
+          attachedFiles: chat.attachedFiles,
+        }),
+      });
+    } catch (err) {
+      console.error("Error saving new chat to Firestore:", err);
+    }
   };
 
-  const deleteChat = (chatId: string) => {
+  const deleteChat = async (chatId: string) => {
     setChats((prev) => {
       const next = prev.filter((c) => c.id !== chatId);
       if (next.length === 0) {
@@ -230,9 +281,18 @@ export default function AnalystDashboard() {
       }
       if (activeChatId === chatId) {
         setActiveChatId(next[0].id);
+        loadMessagesForSession(next[0].id);
       }
       return next;
     });
+
+    try {
+      await fetch(`http://localhost:8000/api/v1/sessions/${chatId}`, {
+        method: "DELETE",
+      });
+    } catch (err) {
+      console.error("Error deleting session from Firestore:", err);
+    }
   };
 
   const switchChat = (chatId: string) => {
@@ -241,16 +301,26 @@ export default function AnalystDashboard() {
     setNodeEvents([]);
     setRunningExplainabilityReason("");
     setHitlRequired(false);
+    loadMessagesForSession(chatId);
   };
 
   // Auto-name chat after first message
-  const autoNameChat = (chatId: string, firstQuery: string) => {
+  const autoNameChat = async (chatId: string, firstQuery: string) => {
     const name = firstQuery.length > 35 ? firstQuery.slice(0, 35) + "…" : firstQuery;
     setChats((prev) =>
       prev.map((c) =>
         c.id === chatId && c.name.startsWith("Chat ") ? { ...c, name } : c
       )
     );
+    try {
+      await fetch(`http://localhost:8000/api/v1/sessions/${chatId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+    } catch (err) {
+      console.error("Error updating session name in Firestore:", err);
+    }
   };
 
   // ── In-Chat File Upload Handler ───────────────────────────────────────────
@@ -326,6 +396,15 @@ export default function AnalystDashboard() {
     updateChat(chat.id, (c) => ({ ...c, messages: [...c.messages, userMsg] }));
     setQuery("");
 
+    // Persist user message directly into Firestore database
+    try {
+      fetch(`http://localhost:8000/api/v1/sessions/${chat.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(userMsg),
+      }).catch((e) => console.error("Error saving user message to Firestore:", e));
+    } catch (_) {}
+
     setIsAnalyzing(true);
     setActiveNode("guardrail");
     setNodeEvents([]);
@@ -379,56 +458,75 @@ export default function AnalystDashboard() {
           }
         }
       }
-    } catch (err) {
-      console.error("SSE stream error:", err);
-    }
 
-    // Animate node stepper
-    setActiveNode("guardrail");
-    setNodeEvents([]);
-    const NODE_STEP_MS = 600;
-    collectedNodeEvents.forEach((data, idx) => {
-      setTimeout(() => {
-        setActiveNode(data.node);
-        setNodeEvents((prev) => [...prev, data]);
-        if (data.node === "planner" && data.explainability_reason) {
-          setRunningExplainabilityReason(data.explainability_reason);
-        }
-      }, idx * NODE_STEP_MS);
-    });
+      // Animate node stepper
+      setActiveNode("guardrail");
+      setNodeEvents([]);
+      const NODE_STEP_MS = 600;
+      collectedNodeEvents.forEach((data, idx) => {
+        setTimeout(() => {
+          setActiveNode(data.node);
+          setNodeEvents((prev) => [...prev, data]);
+          if (data.node === "planner" && data.explainability_reason) {
+            setRunningExplainabilityReason(data.explainability_reason);
+          }
+        }, idx * NODE_STEP_MS);
+      });
 
-    if (hitlPayload) {
-      setTimeout(() => {
-        setHitlRequired(true);
-        setRunningExplainabilityReason(hitlPayload.explainability_reason);
-      }, collectedNodeEvents.length * NODE_STEP_MS);
-    }
-
-    const totalDelay = collectedNodeEvents.length * NODE_STEP_MS + 200;
-    setTimeout(() => {
-      if (completePayload) {
-        setLatestTelemetry(completePayload.telemetry || null);
-        setActiveNode("complete");
-
-        const assistantMsg: ChatMessage = {
-          id: genId(),
-          role: "assistant",
-          content: completePayload.report || "",
-          timestamp: new Date(),
-          citations: completePayload.citations || [],
-          evalScores: completePayload.eval_scores || null,
-          telemetry: completePayload.telemetry || null,
-          nodeEvents: collectedNodeEvents,
-          cacheHit: completePayload.semantic_cache_hit || false,
-          memoryCompacted: completePayload.memory_compacted || false,
-          explainabilityReason: runningExplainabilityReason,
-          searchScope: chat.searchScope,
-        };
-
-        updateChat(chat.id, (c) => ({ ...c, messages: [...c.messages, assistantMsg] }));
+      if (hitlPayload) {
+        setTimeout(() => {
+          setHitlRequired(true);
+          setRunningExplainabilityReason(hitlPayload.explainability_reason);
+        }, collectedNodeEvents.length * NODE_STEP_MS);
       }
+
+      const totalDelay = collectedNodeEvents.length * NODE_STEP_MS + 200;
+      setTimeout(() => {
+        if (completePayload) {
+          setLatestTelemetry(completePayload.telemetry || null);
+          setActiveNode("complete");
+
+          const assistantMsg: ChatMessage = {
+            id: genId(),
+            role: "assistant",
+            content: completePayload.report || "",
+            timestamp: new Date(),
+            citations: completePayload.citations || [],
+            evalScores: completePayload.eval_scores || null,
+            telemetry: completePayload.telemetry || null,
+            nodeEvents: collectedNodeEvents,
+            cacheHit: completePayload.semantic_cache_hit || false,
+            memoryCompacted: completePayload.memory_compacted || false,
+            explainabilityReason: runningExplainabilityReason,
+            searchScope: chat.searchScope,
+          };
+
+          updateChat(chat.id, (c) => ({ ...c, messages: [...c.messages, assistantMsg] }));
+
+          // Persist assistant message to Firestore as a double-backup safety net
+          try {
+            fetch(`http://localhost:8000/api/v1/sessions/${chat.id}/messages`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(assistantMsg),
+            }).catch(() => null);
+          } catch (_) {}
+        }
+        setIsAnalyzing(false);
+      }, totalDelay);
+    } catch (err: any) {
+      console.error("Stream analysis error:", err);
       setIsAnalyzing(false);
-    }, totalDelay);
+      setActiveNode(null);
+      const errorMsg: ChatMessage = {
+        id: genId(),
+        role: "assistant",
+        content: "⚠️ **Backend Connection Error**: The backend API is currently starting up or offline. Please wait a few seconds and try sending your query again.",
+        timestamp: new Date(),
+        searchScope: chat.searchScope,
+      };
+      updateChat(chat.id, (c) => ({ ...c, messages: [...c.messages, errorMsg] }));
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -601,9 +699,9 @@ export default function AnalystDashboard() {
               </button>
             </div>
 
-            {chats.map((chat) => (
+            {chats.map((chat, idx) => (
               <div
-                key={chat.id}
+                key={chat.id || `chat-${idx}`}
                 onClick={() => switchChat(chat.id)}
                 className={`group flex items-center gap-2 rounded-lg px-3 py-2.5 cursor-pointer transition-all ${
                   activeChatId === chat.id
@@ -662,7 +760,7 @@ export default function AnalystDashboard() {
                   <MessageSquare className="h-4 w-4 text-indigo-400" />
                   <span className="text-sm font-semibold text-slate-200">{activeChat?.name}</span>
                   <span className="text-xs text-slate-500 font-mono">
-                    session: {activeChat?.id.slice(0, 8)}…
+                    session: {activeChat?.id?.slice(0, 8) || "init"}…
                   </span>
                   {activeChat?.attachedFiles && activeChat.attachedFiles.length > 0 && (
                     <span className="text-[11px] text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded-full border border-cyan-500/30 flex items-center gap-1 font-medium ml-2">
@@ -730,8 +828,8 @@ export default function AnalystDashboard() {
                   </div>
                 )}
 
-                {activeChat?.messages.map((msg) => (
-                  <div key={msg.id}>
+                {activeChat?.messages.map((msg, idx) => (
+                  <div key={msg.id || `msg-${idx}`}>
                     {msg.role === "user" ? (
                       /* User bubble */
                       <div className="flex justify-end">
@@ -780,8 +878,9 @@ export default function AnalystDashboard() {
                               </div>
                             )}
                             {msg.cacheHit && (
-                              <div className="flex items-center gap-1 text-[11px] bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 px-2.5 py-1 rounded-lg font-semibold">
-                                <Zap className="h-3 w-3" /> Cache Hit (10ms)
+                              <div className="flex items-center gap-1.5 text-[11px] bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 px-3 py-1 rounded-lg font-bold shadow-md shadow-emerald-500/20 animate-pulse">
+                                <Zap className="h-3.5 w-3.5 text-emerald-400 fill-emerald-400" />
+                                <span>Semantic Cache Hit (10ms)</span>
                               </div>
                             )}
                             {msg.memoryCompacted && (
@@ -976,7 +1075,7 @@ export default function AnalystDashboard() {
                   </button>
                 </div>
                 <p className="text-[11px] text-slate-600 mt-1.5 px-1">
-                  Session: <span className="font-mono">{activeChat?.id.slice(0, 16)}…</span>
+                  Session: <span className="font-mono">{activeChat?.id?.slice(0, 16) || "init"}…</span>
                   {" · "}
                   {activeChat?.searchScope === "session"
                     ? "In-Chat RAG (This chat's documents)"
