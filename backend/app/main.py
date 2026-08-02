@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.app.api.v1.analyze import router as analyze_router
 from backend.app.api.v1.documents import router as documents_router
 from backend.app.api.v1.health import router as health_router
+from backend.app.api.v1.sessions import router as sessions_router
 from backend.app.core.config import settings
 from backend.app.core.logging import logger
 
@@ -39,3 +40,4 @@ app.add_middleware(
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
 app.include_router(analyze_router, prefix="/api/v1")
+app.include_router(sessions_router, prefix="/api/v1")

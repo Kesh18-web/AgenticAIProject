@@ -5,6 +5,7 @@ backend/.env
 
 # Internal developer notes & agent configs
 implementation.md
+future_scope.md
 .agents/
 frontend/AGENTS.md
 frontend/CLAUDE.md
