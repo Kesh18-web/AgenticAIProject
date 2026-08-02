@@ -47,9 +47,9 @@ class JudgeAgent:
                 )
                 return scores
 
-            # 2. Live LLM-as-a-Judge Evaluation (Using Heavy Reasoning Model)
+            # 2. Live LLM-as-a-Judge Evaluation
             try:
-                judge_llm = get_llm(model_name="gemini-1.5-pro", temperature=0.0)
+                judge_llm = get_llm(model_name="gemini-1.5-flash", temperature=0.0)
                 prompt = f"""
 User Query: '{query}'
 
@@ -62,6 +62,10 @@ Synthesized Report to Evaluate:
 Number of Footnote Citations Verified: {len(citations)}
 
 You are an Independent Lead AI Evaluation Auditor. Rate the synthesized report across 3 quantitative metrics on a scale from 0.00 to 1.00.
+
+IMPORTANT GROUNDING AUDIT RULE:
+- If the report makes specific claims (e.g. personal projects, companies, dates, or skills) that DO NOT exist in the Retrieved Evidence Context, "groundedness" MUST be low (0.00 to 0.30).
+- If the report correctly states that information is not available in the provided documents, "groundedness" SHOULD be high (0.90 to 1.00).
 
 Return ONLY a valid JSON object with these exact keys:
 {{
@@ -81,9 +85,9 @@ Return ONLY a valid JSON object with these exact keys:
                     raw_text = raw_text.split("```")[1].split("```")[0].strip()
 
                 judge_data = json.loads(raw_text)
-                groundedness = round(float(judge_data.get("groundedness", 0.90)), 2)
-                answer_relevance = round(float(judge_data.get("answer_relevance", 0.90)), 2)
-                citation_coverage = round(float(judge_data.get("citation_coverage", 1.0 if citations else 0.5)), 2)
+                groundedness = round(float(judge_data.get("groundedness", 0.85)), 2)
+                answer_relevance = round(float(judge_data.get("answer_relevance", 0.85)), 2)
+                citation_coverage = round(float(judge_data.get("citation_coverage", 1.0 if citations else 0.0)), 2)
                 overall_quality = round(
                     float(judge_data.get("overall_quality", (groundedness * 0.4 + answer_relevance * 0.4 + citation_coverage * 0.2))),
                     2,
@@ -119,10 +123,14 @@ Return ONLY a valid JSON object with these exact keys:
                     f"[FALLBACK_TRIGGERED] Live LLM-as-a-Judge evaluation call unavailable ({e}). Reverting to fallback metrics."
                 )
 
-            # 3. Fallback Heuristic Judge
-            citation_coverage = 1.0 if citations else 0.5
-            groundedness = 0.95 if reranked_chunks else 0.20
-            answer_relevance = 0.90
+            # 3. Fallback Heuristic Judge (Strict Evidence Overlap)
+            citation_coverage = 1.0 if citations else 0.0
+            if not citations and reranked_chunks:
+                # 0 citations generated for a RAG response means claims were ungrounded
+                groundedness = 0.20
+            else:
+                groundedness = 0.90 if citations else 0.15
+            answer_relevance = 0.85
             overall_quality = round(
                 (groundedness * 0.4) + (answer_relevance * 0.4) + (citation_coverage * 0.2), 2
             )

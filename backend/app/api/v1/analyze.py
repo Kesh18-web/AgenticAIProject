@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 import json
 import time
 import uuid
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 from backend.app.core.logging import logger
 from backend.app.core.state import AnalystState
+from backend.app.db.firestore import firestore_db
 from backend.app.graph.analyst_graph import analyst_graph
 from backend.app.infrastructure.memory_compactor import dual_memory_mgr
 from backend.app.infrastructure.telemetry_engine import telemetry_engine
@@ -122,7 +124,7 @@ async def stream_analysis_events(
         selected_model = accumulated_state.get("selected_model", "gemini-1.5-flash")
         context_text = accumulated_state.get("context_text", "")
         
-        # Add new interaction turn to Dual Memory Store
+        # Add new interaction turn to Dual Memory Store & Firestore
         if final_report:
             dual_memory_mgr.add_turn(
                 session_id=session_id, user_message=query, assistant_reply=final_report
@@ -137,6 +139,21 @@ async def stream_analysis_events(
             is_cache_hit=accumulated_state.get("semantic_cache_hit", False),
         )
 
+        # Persist assistant response directly into Firestore database
+        assistant_msg_data = {
+            "id": f"msg_{int(datetime.utcnow().timestamp()*1000)}",
+            "role": "assistant",
+            "content": final_report,
+            "timestamp": datetime.utcnow().isoformat(),
+            "citations": accumulated_state.get("citations", []),
+            "evalScores": accumulated_state.get("judge_eval_scores", {}),
+            "telemetry": telemetry,
+            "cacheHit": accumulated_state.get("semantic_cache_hit", False),
+            "memoryCompacted": mem_context.get("memory_compacted", False),
+            "searchScope": search_scope,
+        }
+        firestore_db.save_chat_message(session_id, assistant_msg_data)
+
         # Final result event
         final_payload = {
             "event": "complete",
@@ -144,6 +161,7 @@ async def stream_analysis_events(
             "report": final_report,
             "citations": accumulated_state.get("citations", []),
             "eval_scores": accumulated_state.get("judge_eval_scores", {}),
+            "semantic_cache_hit": accumulated_state.get("semantic_cache_hit", False),
             "memory_compacted": mem_context.get("memory_compacted", False),
             "long_term_summary": mem_context.get("long_term_summary", ""),
             "telemetry": telemetry,

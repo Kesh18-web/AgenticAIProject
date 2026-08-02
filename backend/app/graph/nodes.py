@@ -15,7 +15,6 @@ from backend.app.infrastructure.citation_engine import citation_engine
 from backend.app.infrastructure.context_builder import context_builder
 from backend.app.infrastructure.embedding_engine import embedding_engine
 from backend.app.infrastructure.hybrid_retriever import HybridRetriever
-from backend.app.infrastructure.query_rewriter import query_rewriter
 from backend.app.infrastructure.reranker import cross_encoder_reranker
 from backend.app.mcp.mcp_registry import mcp_registry
 
@@ -95,14 +94,10 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
             "mcp_results": mcp_execution_results,
         }
 
-    # 1. Build search targets: User Query + Sub-Tasks from Planner + Sub-Query Variations
+    # 1. Build search targets: User Query + Sub-Tasks from PlannerAgent
     search_queries = [query]
     if sub_tasks and isinstance(sub_tasks, list):
         search_queries.extend(sub_tasks)
-
-    # Expand original query into sub-query variations
-    rewritten_variations = query_rewriter.rewrite_query(query, trace_id=trace_id)
-    search_queries.extend(rewritten_variations)
 
     # Deduplicate search targets while preserving order
     unique_search_targets = list(dict.fromkeys(search_queries))
@@ -143,7 +138,7 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
         context_text += mcp_context_block
 
     result_payload = {
-        "rewritten_queries": rewritten_variations,
+        "rewritten_queries": [],
         "retrieved_chunks": all_retrieved_chunks,
         "reranked_chunks": reranked_chunks,
         "context_text": context_text,

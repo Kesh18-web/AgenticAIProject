@@ -77,13 +77,12 @@ class AnalysisAgent:
                     f"{memory_block}\n"
                     f"Retrieved Grounded Context Chunks:\n{context_text}\n"
                     f"{critique_instruction}\n"
-                    "You are an Enterprise AI Lead Compliance Analyst. Use the conversation history above (if any) to recall prior context such as the user's name or established facts. "
-                    "Synthesize a comprehensive, executive-ready analysis report.\n"
+                    "You are an Enterprise AI Lead Analyst. Use the conversation history above (if any) to recall prior context such as the user's name, preferences, or established facts.\n"
                     "Mandatory Guidelines:\n"
                     "1. Ground every claim directly in the provided context chunks.\n"
                     "2. Use inline footnote citations like [Doc 1], [Doc 2] corresponding to the chunk numbers.\n"
-                    "3. Include structured sections: ### Executive Analysis Report, #### Key Findings & Grounded Evidence, and #### Compliance Conclusion.\n"
-                    "4. Do NOT hallucinate claims outside the provided evidence."
+                    "3. STRICT GROUNDING RULE: If the retrieved context chunks do not contain the answer to the user's specific question (e.g., personal projects, specific work experiences, or dates), you MUST explicitly state: 'The provided documents do not contain information regarding [topic].' Do NOT fabricate, infer, or hallucinate any projects, facts, or details outside the provided evidence.\n"
+                    "4. Format your response naturally: for direct questions, give a clear, direct answer without forcing unnecessary section headers. For comprehensive policy audits, use clean markdown headers."
                 )
 
                 response = llm.invoke(prompt)
