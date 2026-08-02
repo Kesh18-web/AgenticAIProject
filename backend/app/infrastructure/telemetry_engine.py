@@ -29,16 +29,18 @@ class TelemetryEngine:
         is_cache_hit: bool = False,
     ) -> Dict[str, Any]:
         """Compute token counts, dollar cost ($), and per-node latencies for an execution run."""
-        prompt_tokens = self.estimate_tokens(prompt_text)
-        completion_tokens = self.estimate_tokens(completion_text)
-        total_tokens = prompt_tokens + completion_tokens
-
-        # Zero cost if request was served by Cache
+        # Zero tokens & cost if request was served by Cache
         if is_cache_hit:
+            prompt_tokens = 0
+            completion_tokens = 0
+            total_tokens = 0
             total_cost_usd = 0.0
             prompt_cost = 0.0
             completion_cost = 0.0
         else:
+            prompt_tokens = self.estimate_tokens(prompt_text)
+            completion_tokens = self.estimate_tokens(completion_text)
+            total_tokens = prompt_tokens + completion_tokens
             rates = MODEL_PRICING.get(
                 model_name.lower(),
                 {"prompt_per_1m": 0.10, "completion_per_1m": 0.40},

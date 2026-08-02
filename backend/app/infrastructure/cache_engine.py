@@ -100,9 +100,9 @@ class RetrievalCache:
 
 
 class SemanticCosineCache:
-    """Tier 2 Cache: Vector Cosine Similarity (>0.95) to return instant 10ms responses for conceptual queries."""
+    """Tier 2 Cache: Vector Cosine Similarity (>0.85) to return instant 10ms responses for conceptual queries."""
 
-    def __init__(self, similarity_threshold: float = 0.95, ttl_seconds: int = 7200):
+    def __init__(self, similarity_threshold: float = 0.85, ttl_seconds: int = 7200):
         self.similarity_threshold = similarity_threshold
         self.ttl_seconds = ttl_seconds
         self._entries: List[Dict[str, Any]] = []
@@ -118,7 +118,17 @@ class SemanticCosineCache:
             best_score = 0.0
             best_entry = None
 
-            for entry in self._entries:
+            # 1. Fetch entries from Redis if available
+            entries_to_check = self._entries
+            if HAS_REDIS and redis_client:
+                try:
+                    redis_data = redis_client.get("semantic_cache_entries")
+                    if redis_data:
+                        entries_to_check = json.loads(redis_data)
+                except Exception as e:
+                    log.warning(f"[SemanticCache] Error reading Redis entries: {e}")
+
+            for entry in entries_to_check:
                 if now - entry["timestamp"] > self.ttl_seconds:
                     continue
 
@@ -136,7 +146,7 @@ class SemanticCosineCache:
                 cached_copy["semantic_similarity_score"] = round(best_score, 4)
                 return cached_copy
 
-            log.info(f"[SemanticCache] MISS. Best similarity score was {best_score:.4f}")
+            log.info(f"[SemanticCache] MISS. Best similarity score was {best_score:.4f} (Threshold: {self.similarity_threshold})")
             return None
 
     def set(
@@ -144,16 +154,25 @@ class SemanticCosineCache:
     ) -> None:
         if not query_vector:
             return
-        self._entries.append(
-            {
-                "timestamp": time.time(),
-                "vector": query_vector,
-                "payload": payload,
-            }
-        )
-        logger.info(f"[SemanticCache] STORED conceptual query vector into Semantic Cache")
+        entry = {
+            "timestamp": time.time(),
+            "vector": query_vector,
+            "payload": payload,
+        }
+        self._entries.append(entry)
+
+        if HAS_REDIS and redis_client:
+            try:
+                # Keep up to 100 recent entries in Redis
+                recent_entries = self._entries[-100:]
+                redis_client.set("semantic_cache_entries", json.dumps(recent_entries), ex=self.ttl_seconds)
+                logger.info(f"[SemanticCache] STORED conceptual query vector into Redis Store (Threshold: {self.similarity_threshold})")
+            except Exception as e:
+                logger.warning(f"[SemanticCache] Error writing to Redis: {e}")
+        else:
+            logger.info(f"[SemanticCache] STORED conceptual query vector into In-Memory Cache (Threshold: {self.similarity_threshold})")
 
 
 # Singleton Cache Instances
 retrieval_cache = RetrievalCache(ttl_seconds=3600)
-semantic_cache = SemanticCosineCache(similarity_threshold=0.95, ttl_seconds=7200)
+semantic_cache = SemanticCosineCache(similarity_threshold=0.85, ttl_seconds=7200)
