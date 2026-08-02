@@ -149,15 +149,29 @@ class SemanticCosineCache:
             log.info(f"[SemanticCache] MISS. Best similarity score was {best_score:.4f} (Threshold: {self.similarity_threshold})")
             return None
 
+def _make_json_serializable(obj: Any) -> Any:
+    """Recursively convert Pydantic models and complex objects into JSON primitives."""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if hasattr(obj, "dict"):
+        return obj.dict()
+    if isinstance(obj, dict):
+        return {k: _make_json_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_make_json_serializable(item) for item in obj]
+    return obj
+
+
     def set(
         self, query_vector: List[float], payload: Dict[str, Any]
     ) -> None:
         if not query_vector:
             return
+        clean_payload = _make_json_serializable(payload)
         entry = {
             "timestamp": time.time(),
             "vector": query_vector,
-            "payload": payload,
+            "payload": clean_payload,
         }
         self._entries.append(entry)
 
@@ -168,7 +182,7 @@ class SemanticCosineCache:
                 redis_client.set("semantic_cache_entries", json.dumps(recent_entries), ex=self.ttl_seconds)
                 logger.info(f"[SemanticCache] STORED conceptual query vector into Redis Store (Threshold: {self.similarity_threshold})")
             except Exception as e:
-                logger.warning(f"[SemanticCache] Error writing to Redis: {e}")
+                logger.error(f"[SemanticCache] Error writing to Redis: {e}")
         else:
             logger.info(f"[SemanticCache] STORED conceptual query vector into In-Memory Cache (Threshold: {self.similarity_threshold})")
 
