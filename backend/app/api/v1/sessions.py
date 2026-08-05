@@ -102,3 +102,38 @@ async def delete_session(session_id: str):
     except Exception as e:
         logger.error(f"Error deleting session [{session_id}]: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+@router.post("/{session_id}/generate-name")
+async def generate_session_name(session_id: str, body: Dict[str, Any]):
+    """
+    Generate a concise, ChatGPT-style session title from the first user query.
+    Uses unified LLM factory with a tight prompt to produce a clean 4-6 word title.
+    Persists the generated name to Firestore automatically.
+    """
+    try:
+        from backend.app.core.llm import get_llm
+
+        first_query = body.get("query", "").strip()
+        if not first_query:
+            raise HTTPException(status_code=400, detail="query field is required")
+
+        llm = get_llm(model_name="gemini-2.0-flash", temperature=0.3, max_tokens=20)
+        prompt = (
+            "Generate a concise, descriptive chat title (4-6 words max) for the following user query. "
+            "Do NOT use quotes, punctuation, or markdown. Output plain text title only.\n\n"
+            f"Query: {first_query}\n\nTitle:"
+        )
+        response = llm.invoke(prompt)
+        name = str(response.content).strip().strip('"').strip("'").strip()
+
+        # Truncate hard limit safety
+        if len(name) > 60:
+            name = name[:57] + "…"
+
+        firestore_db.save_chat_session(session_id, {"name": name})
+        logger.info(f"[Sessions] Auto-named session '{session_id}' → '{name}'")
+        return {"status": "success", "name": name}
+
+    except Exception as e:
+        logger.error(f"Error generating name for session [{session_id}]: {e}")
+        fallback = first_query[:40] + "…" if len(first_query) > 40 else first_query
+        return {"status": "fallback", "name": fallback}
