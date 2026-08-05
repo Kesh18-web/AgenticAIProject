@@ -1,229 +1,97 @@
 from datetime import datetime
-import os
 from typing import Any, Dict, List, Optional
-from backend.app.core.config import settings
 from backend.app.core.logging import logger
 
-try:
-    import firebase_admin
-    from firebase_admin import credentials, firestore
-    from google.cloud import firestore as gfirestore
-
-    HAS_FIREBASE_LIB = True
-except ImportError:
-    HAS_FIREBASE_LIB = False
-
-
-class MockFirestoreDB:
-    """In-memory dictionary fallback when Firebase credentials are not yet configured."""
-
-    def __init__(self):
-        self._collections: Dict[str, Dict[str, Any]] = {}
-        logger.warning(
-            "Using MockFirestoreDB (In-Memory). Provide valid FIREBASE_CREDENTIALS_PATH for production persistence."
-        )
-
-    def collection(self, name: str):
-        if name not in self._collections:
-            self._collections[name] = {}
-        return MockCollection(self._collections[name])
-
-
-class MockCollection:
-
-    def __init__(self, store: Dict[str, Any]):
-        self._store = store
-
-    def document(self, doc_id: str):
-        return MockDocumentRef(self._store, doc_id)
-
-
-class MockDocumentRef:
-
-    def __init__(self, store: Dict[str, Any], doc_id: str):
-        self._store = store
-        self._doc_id = doc_id
-
-    def set(self, data: Dict[str, Any]):
-        self._store[self._doc_id] = data
-        return True
-
-    def get(self):
-        data = self._store.get(self._doc_id)
-
-        class Snap:
-
-            def __init__(self, exists, val):
-                self.exists = exists
-                self._val = val
-
-            def to_dict(self):
-                return self._val
-
-        return Snap(data is not None, data)
+import firebase_admin
+from firebase_admin import firestore
+from google.cloud import firestore as gfirestore
 
 
 class FirestoreManager:
-    """Firestore Client Manager handling live Firebase Firestore and local mock fallback."""
+    """
+    Strict Production GCP Firestore Client Manager.
+    Does NOT contain local fallbacks. If GCP Cloud Firestore credentials, 
+    billing, or connection fail, it raises exceptions loudly so system administrators 
+    and developers are notified of the integration failure immediately.
+    """
 
     def __init__(self):
         self.db = None
-        self.is_mock = True
         self._initialize()
 
     def _initialize(self):
-        if HAS_FIREBASE_LIB:
-            try:
-                # Initialize Firebase App using Application Default Credentials (ADC)
-                if not firebase_admin._apps:
-                    firebase_admin.initialize_app()
-                
-                # Connect to the custom database 'enterprise-analyst-db' using google-cloud-firestore Client
-                self.db = gfirestore.Client(database="enterprise-analyst-db")
-                self.is_mock = False
-                logger.info(
-                    "Successfully connected to Firestore database 'enterprise-analyst-db' using Application Default Credentials (ADC)"
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to initialize Firestore via ADC: {e}. Falling back to MockFirestore."
-                )
-                self.db = MockFirestoreDB()
-        else:
-            self.db = MockFirestoreDB()
-
-    def save_document(
-        self, collection_name: str, doc_id: str, data: Dict[str, Any]
-    ) -> bool:
-        """Save or update a document in Firestore."""
         try:
-            self.db.collection(collection_name).document(doc_id).set(data)
-            logger.debug(
-                f"Saved document '{doc_id}' into Firestore collection '{collection_name}'"
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error writing to Firestore [{collection_name}/{doc_id}]: {e}")
-            return False
-
-    def get_document(
-        self, collection_name: str, doc_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """Retrieve a document from Firestore by ID."""
-        try:
-            doc_ref = self.db.collection(collection_name).document(doc_id)
-            doc_snap = doc_ref.get()
-            if doc_snap.exists:
-                return doc_snap.to_dict()
-            return None
-        except Exception as e:
-            logger.error(
-                f"Error reading from Firestore [{collection_name}/{doc_id}]: {e}"
-            )
-            return None
-
-    def get_session_history(
-        self, session_id: str, limit: int = 5
-    ) -> List[Dict[str, Any]]:
-        """Retrieve past conversation turns for multi-turn chat memory."""
-        try:
-            turns_ref = self.db.collection("sessions").document(session_id).collection("turns")
-            if self.is_mock:
-                return []
+            if not firebase_admin._apps:
+                firebase_admin.initialize_app()
             
-            docs = turns_ref.order_by("timestamp", direction=gfirestore.Query.DESCENDING).limit(limit).stream()
-            history = [doc.to_dict() for doc in docs]
-            history.reverse()
-            return history
+            # Connect strictly to the custom database 'enterprise-analyst-db'
+            self.db = gfirestore.Client(database="enterprise-analyst-db")
+            logger.info("Successfully connected to Firestore database 'enterprise-analyst-db' via ADC")
         except Exception as e:
-            logger.error(f"Error fetching session history for [{session_id}]: {e}")
-            return []
+            logger.error(f"Critical Firestore initialization failure: {e}")
+            raise e
 
-    def list_collection_documents(
-        self, collection_name: str, limit: int = 20
-    ) -> List[Dict[str, Any]]:
-        """List uploaded document metadata records from Firestore."""
-        try:
-            if self.is_mock:
-                return []
-            docs = self.db.collection(collection_name).limit(limit).stream()
-            return [doc.to_dict() for doc in docs]
-        except Exception as e:
-            logger.error(f"Error listing collection [{collection_name}]: {e}")
-            return []
+    def save_document(self, collection_name: str, doc_id: str, data: Dict[str, Any]) -> bool:
+        """Save or update a document in Firestore. Raises exceptions on failure."""
+        self.db.collection(collection_name).document(doc_id).set(data)
+        logger.debug(f"Saved document '{doc_id}' into Firestore collection '{collection_name}'")
+        return True
+
+    def get_document(self, collection_name: str, doc_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a document by ID. Raises exceptions on failure."""
+        doc_snap = self.db.collection(collection_name).document(doc_id).get()
+        if doc_snap.exists:
+            return doc_snap.to_dict()
+        return None
 
     def save_chat_session(self, session_id: str, data: Dict[str, Any]) -> bool:
-        """Save or update chat session metadata in Firestore 'chat_sessions' collection."""
-        try:
-            self.db.collection("chat_sessions").document(session_id).set(data, merge=True)
-            logger.debug(f"Saved session '{session_id}' in Firestore")
-            return True
-        except Exception as e:
-            logger.error(f"Error saving session [{session_id}] to Firestore: {e}")
-            return False
+        """Save or update chat session metadata in Firestore. Raises exceptions on failure."""
+        self.db.collection("chat_sessions").document(session_id).set(data, merge=True)
+        logger.debug(f"Saved chat session '{session_id}' in Firestore")
+        return True
 
     def list_chat_sessions(self) -> List[Dict[str, Any]]:
-        """List all persistent chat sessions from Firestore ordered by creation timestamp."""
-        try:
-            if self.is_mock or not hasattr(self.db, "collection"):
-                return []
-            docs = self.db.collection("chat_sessions").stream()
-            sessions = []
-            for doc in docs:
-                data = doc.to_dict()
-                if not data.get("id"):
-                    data["id"] = doc.id
-                sessions.append(data)
-            sessions.sort(key=lambda s: s.get("createdAt", 0))
-            return sessions
-        except Exception as e:
-            logger.error(f"Error listing chat sessions from Firestore: {e}")
-            return []
+        """List all persistent chat sessions from Firestore ordered by creation timestamp. Raises exceptions on failure."""
+        docs = self.db.collection("chat_sessions").stream()
+        sessions = []
+        for doc in docs:
+            data = doc.to_dict()
+            if not data.get("id"):
+                data["id"] = doc.id
+            sessions.append(data)
+        sessions.sort(key=lambda s: s.get("createdAt", 0))
+        return sessions
 
     def delete_chat_session(self, session_id: str) -> bool:
-        """Delete chat session and its subcollection messages from Firestore."""
-        try:
-            if not session_id or session_id == "undefined":
-                return False
-            # Delete session document
-            self.db.collection("chat_sessions").document(session_id).delete()
-            # Delete messages subcollection documents
-            msg_docs = self.db.collection("chat_sessions").document(session_id).collection("messages").stream()
-            for doc in msg_docs:
-                doc.reference.delete()
-            logger.info(f"Deleted chat session '{session_id}' and all messages from Firestore")
-            return True
-        except Exception as e:
-            logger.error(f"Error deleting session [{session_id}] from Firestore: {e}")
+        """Delete chat session and all its messages. Raises exceptions on failure."""
+        if not session_id or session_id == "undefined":
             return False
+        # Delete session document
+        self.db.collection("chat_sessions").document(session_id).delete()
+        # Delete messages subcollection documents
+        msg_docs = self.db.collection("chat_sessions").document(session_id).collection("messages").stream()
+        for doc in msg_docs:
+            doc.reference.delete()
+        logger.info(f"Deleted chat session '{session_id}' and all messages from Firestore")
+        return True
 
     def save_chat_message(self, session_id: str, message: Dict[str, Any]) -> bool:
-        """Save a message into Firestore subcollection 'chat_sessions/{session_id}/messages'."""
-        try:
-            if not session_id or session_id == "undefined":
-                return False
-            msg_id = message.get("id") or f"msg_{int(datetime.utcnow().timestamp()*1000)}"
-            self.db.collection("chat_sessions").document(session_id).collection("messages").document(msg_id).set(message)
-            logger.debug(f"Saved message '{msg_id}' to session '{session_id}' in Firestore")
-            return True
-        except Exception as e:
-            logger.error(f"Error saving message to session [{session_id}] in Firestore: {e}")
+        """Save a message into Firestore subcollection 'chat_sessions/{session_id}/messages'. Raises exceptions on failure."""
+        if not session_id or session_id == "undefined":
             return False
+        msg_id = message.get("id") or f"msg_{int(datetime.utcnow().timestamp()*1000)}"
+        self.db.collection("chat_sessions").document(session_id).collection("messages").document(msg_id).set(message)
+        logger.debug(f"Saved message '{msg_id}' to session '{session_id}' in Firestore")
+        return True
 
     def get_chat_messages(self, session_id: str) -> List[Dict[str, Any]]:
-        """Retrieve all messages for a session from Firestore subcollection 'chat_sessions/{session_id}/messages'."""
-        try:
-            if not session_id or session_id == "undefined":
-                return []
-            if self.is_mock or not hasattr(self.db, "collection"):
-                return []
-            msg_docs = self.db.collection("chat_sessions").document(session_id).collection("messages").stream()
-            messages = [doc.to_dict() for doc in msg_docs]
-            messages.sort(key=lambda m: str(m.get("timestamp") or ""))
-            return messages
-        except Exception as e:
-            logger.error(f"Error fetching messages for session [{session_id}] from Firestore: {e}")
+        """Retrieve all messages for a session from Firestore. Raises exceptions on failure."""
+        if not session_id or session_id == "undefined":
             return []
+        msg_docs = self.db.collection("chat_sessions").document(session_id).collection("messages").stream()
+        messages = [doc.to_dict() for doc in msg_docs]
+        messages.sort(key=lambda m: str(m.get("timestamp") or ""))
+        return messages
 
 
 # Global singleton instance
