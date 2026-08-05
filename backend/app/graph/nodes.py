@@ -10,7 +10,7 @@ from backend.app.core.logging import logger
 from backend.app.core.state import AnalystState
 from backend.app.db.bm25 import bm25_mgr
 from backend.app.db.qdrant import qdrant_store
-from backend.app.infrastructure.cache_engine import retrieval_cache, semantic_cache
+from backend.app.infrastructure.cache_engine import cache_manager
 from backend.app.infrastructure.citation_engine import citation_engine
 from backend.app.infrastructure.context_builder import context_builder
 from backend.app.infrastructure.embedding_engine import embedding_engine
@@ -22,9 +22,47 @@ from backend.app.mcp.mcp_registry import mcp_registry
 hybrid_retriever = HybridRetriever(qdrant_mgr=qdrant_store, bm25_mgr=bm25_mgr)
 
 
+def cache_node(state: AnalystState) -> Dict[str, Any]:
+    """
+    LangGraph Entry Node: Single Unified Cache Evaluation.
+    
+    Evaluates both Exact Query Hashes (Tier 1) and Semantic Vector Cosine Similarity (Tier 2).
+    Generates query embedding ONCE and stores it in state so downstream nodes reuse it without duplicate work.
+    """
+    trace_id = state.get("trace_id") or str(uuid.uuid4())[:8]
+    query = state.get("user_query", "")
+    session_id = state.get("session_id", "default_session")
+    search_scope = state.get("search_scope", "session")
+
+    cached_payload, query_embedding = cache_manager.check_cache(
+        query=query, session_id=session_id, search_scope=search_scope, trace_id=trace_id
+    )
+
+    if cached_payload:
+        cache_type = cached_payload.get("cache_type", "semantic_vector")
+        reason = cached_payload.get("explainability_reason", "Cached query response returned from ultra-fast enterprise cache.")
+        return {
+            "trace_id": trace_id,
+            "analysis_report": cached_payload.get("analysis_report", ""),
+            "citations": cached_payload.get("citations", []),
+            "judge_eval_scores": cached_payload.get("judge_eval_scores", {"groundedness": 0.95, "citations": 0.90}),
+            "output_guardrail_audit": cached_payload.get("output_guardrail_audit", {}),
+            "explainability_reason": reason,
+            "cache_type": cache_type,
+            "query_embedding": query_embedding,
+            "semantic_cache_hit": True,
+        }
+
+    return {
+        "trace_id": trace_id,
+        "query_embedding": query_embedding,
+        "semantic_cache_hit": False,
+    }
+
+
 def guardrail_node(state: AnalystState) -> Dict[str, Any]:
     """LangGraph Node: Execute Guardrail Security Inspection."""
-    trace_id = state.get("trace_id") or str(uuid.uuid4())[:8]
+    trace_id = state.get("trace_id", "N/A")
     status = guardrail_agent.check_input(state)
     return {"guardrail_status": status, "trace_id": trace_id}
 
@@ -57,11 +95,6 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
         session_filter = session_id
         target_session_ids = None
 
-    # Check Tier-1 Retrieval Cache
-    cached_retrieval = retrieval_cache.get(query, session_id, search_scope)
-    if cached_retrieval:
-        return cached_retrieval
-
     # Extract dynamic retrieval weights chosen by Planner Agent
     top_k = int(plan.get("top_k", 10))
     bm25_weight = float(plan.get("bm25_weight", 0.5))
@@ -82,15 +115,22 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
             repo_name=github_repo,
         )
         if mcp_execution_results.get("data"):
-            mcp_context_block = f"\n\n--- [LIVE MCP TOOL EXECUTION RESULTS] ---\n{mcp_execution_results['data']}\n"
+            mcp_lines = ["\n[Live Web & Real-Time Search Context]:"]
+            for tool_name, tool_output in mcp_execution_results["data"].items():
+                if isinstance(tool_output, list):
+                    for idx, item in enumerate(tool_output, start=1):
+                        mcp_lines.append(f"[Web {idx}] Source: {item.get('title', 'Live Data')}\nEvidence Snippet: {item.get('snippet', '')}")
+                elif isinstance(tool_output, dict):
+                    mcp_lines.append(f"[Web 1] Evidence Snippet: {tool_output}")
+            mcp_context_block = "\n\n".join(mcp_lines)
 
-    # Fast-path bypass for general knowledge queries that do not require document retrieval
-    if not requires_rag and not requires_mcp:
+    # Fast-path bypass for queries that do not require RAG document retrieval
+    if not requires_rag:
         return {
             "rewritten_queries": [],
             "retrieved_chunks": [],
             "reranked_chunks": [],
-            "context_text": "General Knowledge Query (RAG Search Bypassed).",
+            "context_text": mcp_context_block if mcp_context_block else "General Knowledge Query (RAG Search Bypassed).",
             "mcp_results": mcp_execution_results,
         }
 
@@ -102,9 +142,11 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
     # Deduplicate search targets while preserving order
     unique_search_targets = list(dict.fromkeys(search_queries))
 
-    # 2. Retrieve via Dynamic Weighted Hybrid RRF across ALL sub-task & query targets
-    # Embed original query once — used for all retrieval targets
-    query_embedding = embedding_engine.embed(query)
+    # 2. Reuse already-computed query embedding from Cache Node to eliminate double-computation!
+    query_embedding = state.get("query_embedding")
+    if not query_embedding:
+        query_embedding = embedding_engine.embed(query)
+
     all_retrieved_chunks = []
     seen_keys = set()
 
@@ -143,10 +185,9 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
         "reranked_chunks": reranked_chunks,
         "context_text": context_text,
         "mcp_results": mcp_execution_results,
+        "query_embedding": query_embedding,
     }
 
-    # Store into Tier-1 Retrieval Cache
-    retrieval_cache.set(query, session_id, search_scope, result_payload)
     return result_payload
 
 
@@ -154,13 +195,10 @@ def analysis_node(state: AnalystState) -> Dict[str, Any]:
     """LangGraph Node: Synthesize Evidence-Grounded Compliance Analysis & Verify Footnote Citations."""
     query = state.get("user_query", "")
     trace_id = state.get("trace_id", "N/A")
+    session_id = state.get("session_id", "default_session")
+    search_scope = state.get("search_scope", "session")
     reranked_chunks = state.get("reranked_chunks", [])
-
-    # Generate real query embedding for semantic cache lookup
-    query_embedding = embedding_engine.embed(query)
-    cached_semantic = semantic_cache.get(query_embedding, trace_id=trace_id)
-    if cached_semantic:
-        return cached_semantic
+    query_embedding = state.get("query_embedding", [])
 
     raw_report = analysis_agent.generate_analysis(state)
     
@@ -180,8 +218,14 @@ def analysis_node(state: AnalystState) -> Dict[str, Any]:
         "output_guardrail_audit": output_audit,
     }
 
-    # Store synthesized report into Tier-2 Semantic Cosine Cache
-    semantic_cache.set(query_embedding, result_payload)
+    # Store synthesized report into Unified Cache Manager
+    cache_manager.store_cache(
+        query=query,
+        query_vector=query_embedding,
+        session_id=session_id,
+        search_scope=search_scope,
+        payload=result_payload,
+    )
     return result_payload
 
 
@@ -198,6 +242,30 @@ def reflection_node(state: AnalystState) -> Dict[str, Any]:
 
 
 def judge_node(state: AnalystState) -> Dict[str, Any]:
-    """LangGraph Node: Evaluate Groundedness Metrics & Persist to Firestore."""
+    """LangGraph Node: Evaluate Groundedness Metrics & Persist to Firestore & Cache."""
     scores = judge_agent.evaluate_output(state)
+    query = state.get("user_query", "")
+    session_id = state.get("session_id", "default_session")
+    search_scope = state.get("search_scope", "session")
+    query_embedding = state.get("query_embedding", [])
+    report = state.get("analysis_report", "")
+    citations = state.get("citations", [])
+
+    if report:
+        explain_reason = state.get("plan", {}).get("explainability_reason", "Balanced hybrid search selected to combine exact terms with semantic context.")
+        payload = {
+            "analysis_report": report,
+            "citations": citations,
+            "judge_eval_scores": scores,
+            "explainability_reason": explain_reason,
+            "output_guardrail_audit": state.get("output_guardrail_audit", {}),
+        }
+        cache_manager.store_cache(
+            query=query,
+            query_vector=query_embedding,
+            session_id=session_id,
+            search_scope=search_scope,
+            payload=payload,
+        )
+
     return {"judge_eval_scores": scores}
