@@ -64,5 +64,10 @@ class AnalystState(TypedDict, total=False):
         str, float
     ]  # e.g., {'groundedness': 0.95, 'relevance': 0.90}
 
+    # Caching State
+    query_embedding: Optional[List[float]]
+    semantic_cache_hit: Optional[bool]
+    cache_type: Optional[str]  # 'exact_hash' | 'semantic_vector' | None
+
     # Live UI Execution Log Stream
     node_execution_logs: List[Dict[str, Any]]

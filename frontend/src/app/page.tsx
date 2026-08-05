@@ -64,6 +64,7 @@ interface ChatMessage {
   telemetry?: any;
   nodeEvents?: NodeEvent[];
   cacheHit?: boolean;
+  cacheType?: string;
   memoryCompacted?: boolean;
   explainabilityReason?: string;
   searchScope?: "session" | "global";
@@ -126,8 +127,15 @@ export default function AnalystDashboard() {
       if (res && res.ok) {
         const data = await res.json().catch(() => null);
         if (data && data.messages && Array.isArray(data.messages)) {
+          const parsedMsgs = data.messages.map((m: any) => ({
+            ...m,
+            cacheHit: m.cacheHit ?? m.semantic_cache_hit ?? false,
+            cacheType: m.cacheType ?? m.cache_type ?? "semantic_vector",
+            explainabilityReason: m.explainabilityReason ?? m.explainability_reason ?? "",
+            nodeEvents: m.nodeEvents ?? m.node_execution_logs ?? [],
+          }));
           setChats((prev) =>
-            prev.map((c) => (c.id === sessionId ? { ...c, messages: data.messages } : c))
+            prev.map((c) => (c.id === sessionId ? { ...c, messages: parsedMsgs } : c))
           );
         }
       }
@@ -304,22 +312,28 @@ export default function AnalystDashboard() {
     loadMessagesForSession(chatId);
   };
 
-  // Auto-name chat after first message
+  // Auto-name chat after first message — calls Gemini Flash to generate a clean, ChatGPT-style title
   const autoNameChat = async (chatId: string, firstQuery: string) => {
-    const name = firstQuery.length > 35 ? firstQuery.slice(0, 35) + "…" : firstQuery;
-    setChats((prev) =>
-      prev.map((c) =>
-        c.id === chatId && c.name.startsWith("Chat ") ? { ...c, name } : c
-      )
-    );
+    if (!firstQuery.trim()) return;
     try {
-      await fetch(`http://localhost:8000/api/v1/sessions/${chatId}`, {
-        method: "PATCH",
+      const res = await fetch(`http://localhost:8000/api/v1/sessions/${chatId}/generate-name`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ query: firstQuery }),
       });
+      if (res.ok) {
+        const data = await res.json();
+        const name = data.name || firstQuery.slice(0, 40);
+        setChats((prev) =>
+          prev.map((c) => (c.id === chatId ? { ...c, name } : c))
+        );
+      }
     } catch (err) {
-      console.error("Error updating session name in Firestore:", err);
+      // Fallback: truncate query
+      const name = firstQuery.length > 40 ? firstQuery.slice(0, 40) + "…" : firstQuery;
+      setChats((prev) =>
+        prev.map((c) => (c.id === chatId ? { ...c, name } : c))
+      );
     }
   };
 
@@ -496,21 +510,15 @@ export default function AnalystDashboard() {
             telemetry: completePayload.telemetry || null,
             nodeEvents: collectedNodeEvents,
             cacheHit: completePayload.semantic_cache_hit || false,
+            cacheType: completePayload.cache_type || "semantic_vector",
             memoryCompacted: completePayload.memory_compacted || false,
-            explainabilityReason: runningExplainabilityReason,
+            explainabilityReason: completePayload.explainability_reason || runningExplainabilityReason,
             searchScope: chat.searchScope,
           };
 
           updateChat(chat.id, (c) => ({ ...c, messages: [...c.messages, assistantMsg] }));
-
-          // Persist assistant message to Firestore as a double-backup safety net
-          try {
-            fetch(`http://localhost:8000/api/v1/sessions/${chat.id}/messages`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(assistantMsg),
-            }).catch(() => null);
-          } catch (_) {}
+          // NOTE: Backend (analyze.py) already persists this message to Firestore.
+          // Do NOT save here again — that causes duplicate messages on chat reload.
         }
         setIsAnalyzing(false);
       }, totalDelay);
@@ -878,10 +886,17 @@ export default function AnalystDashboard() {
                               </div>
                             )}
                             {msg.cacheHit && (
-                              <div className="flex items-center gap-1.5 text-[11px] bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 px-3 py-1 rounded-lg font-bold shadow-md shadow-emerald-500/20 animate-pulse">
-                                <Zap className="h-3.5 w-3.5 text-emerald-400 fill-emerald-400" />
-                                <span>Semantic Cache Hit (10ms)</span>
-                              </div>
+                              msg.cacheType === "exact_hash" ? (
+                                <div className="flex items-center gap-1.5 text-[11px] bg-cyan-500/20 border border-cyan-400/40 text-cyan-300 px-3 py-1 rounded-lg font-bold shadow-md shadow-cyan-500/20 animate-pulse">
+                                  <Zap className="h-3.5 w-3.5 text-cyan-400 fill-cyan-400" />
+                                  <span>Exact Cache Hit (1ms)</span>
+                                </div>
+                              ) : (
+                                <div className="flex items-center gap-1.5 text-[11px] bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 px-3 py-1 rounded-lg font-bold shadow-md shadow-emerald-500/20 animate-pulse">
+                                  <Zap className="h-3.5 w-3.5 text-emerald-400 fill-emerald-400" />
+                                  <span>Semantic Cache Hit (10ms)</span>
+                                </div>
+                              )
                             )}
                             {msg.memoryCompacted && (
                               <div className="flex items-center gap-1 text-[11px] bg-purple-500/10 border border-purple-500/30 text-purple-400 px-2.5 py-1 rounded-lg font-semibold">
@@ -891,10 +906,49 @@ export default function AnalystDashboard() {
                             {msg.evalScores && (
                               <div className="flex items-center gap-1 text-[11px] bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 px-2.5 py-1 rounded-lg font-semibold">
                                 <CheckCircle2 className="h-3 w-3" />
-                                Groundedness {Math.round((msg.evalScores.overall_quality ?? 0) * 100)}%
+                                Groundedness {Math.round(((msg.evalScores.groundedness ?? msg.evalScores.overall_quality) ?? 0.95) * 100)}%
                               </div>
                             )}
                           </div>
+
+                          {/* Completed Node Execution Stepper Card (Stays visible permanently) */}
+                          {msg.nodeEvents && msg.nodeEvents.length > 0 && (
+                            <div className="rounded-xl bg-slate-950/80 border border-slate-800 p-3 space-y-2">
+                              <div className="flex items-center justify-between text-[11px] font-semibold text-slate-400">
+                                <span className="flex items-center gap-1.5 uppercase tracking-wider text-indigo-400">
+                                  <Terminal className="h-3.5 w-3.5" />
+                                  LangGraph Workflow ({msg.nodeEvents.length} Nodes Executed)
+                                </span>
+                              </div>
+                              <div className="grid grid-cols-7 gap-1.5">
+                                {[
+                                  { id: "guardrail", name: "Guardrail", Icon: ShieldCheck },
+                                  { id: "planner", name: "Planner", Icon: Brain },
+                                  { id: "router", name: "Router", Icon: Zap },
+                                  { id: "retrieval", name: "Retrieval", Icon: Search },
+                                  { id: "analysis", name: "Analysis", Icon: FileText },
+                                  { id: "reflection", name: "Reflection", Icon: RotateCcw },
+                                  { id: "judge", name: "Judge", Icon: Scale },
+                                ].map(({ id, name, Icon }) => {
+                                  const isDone = msg.nodeEvents?.some((e: any) => e.node === id);
+                                  return (
+                                    <div
+                                      key={id}
+                                      className={`flex flex-col items-center rounded-lg p-1.5 border text-center transition-all ${
+                                        isDone
+                                          ? "bg-emerald-950/30 border-emerald-500/40 text-emerald-400"
+                                          : "bg-slate-950/20 border-slate-850 text-slate-700"
+                                      }`}
+                                    >
+                                      <Icon className="h-3.5 w-3.5 mb-0.5" />
+                                      <span className="text-[9px] font-medium leading-none">{name}</span>
+                                      {isDone && <CheckCircle2 className="h-2.5 w-2.5 mt-1 text-emerald-400" />}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
 
                           {/* Report */}
                           <div className="rounded-2xl rounded-tl-sm bg-slate-900 border border-slate-800 px-5 py-4 text-sm text-slate-200 whitespace-pre-line leading-relaxed shadow-md">

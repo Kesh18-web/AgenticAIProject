@@ -76,7 +76,9 @@ async def stream_analysis_events(
                     "latency_ms": node_latencies[node_name],
                 }
 
-                if node_name == "guardrail":
+                if node_name == "cache":
+                    node_log["cache_hit"] = node_state.get("semantic_cache_hit", False)
+                elif node_name == "guardrail":
                     node_log["safe"] = node_state.get("guardrail_status", {}).get(
                         "safe"
                     )
@@ -148,7 +150,10 @@ async def stream_analysis_events(
             "citations": accumulated_state.get("citations", []),
             "evalScores": accumulated_state.get("judge_eval_scores", {}),
             "telemetry": telemetry,
+            "nodeEvents": accumulated_state.get("node_execution_logs", []),
             "cacheHit": accumulated_state.get("semantic_cache_hit", False),
+            "cacheType": accumulated_state.get("cache_type", "semantic_vector"),
+            "explainabilityReason": accumulated_state.get("explainability_reason", ""),
             "memoryCompacted": mem_context.get("memory_compacted", False),
             "searchScope": search_scope,
         }
@@ -162,6 +167,8 @@ async def stream_analysis_events(
             "citations": accumulated_state.get("citations", []),
             "eval_scores": accumulated_state.get("judge_eval_scores", {}),
             "semantic_cache_hit": accumulated_state.get("semantic_cache_hit", False),
+            "cache_type": accumulated_state.get("cache_type", "semantic_vector"),
+            "explainability_reason": accumulated_state.get("explainability_reason", ""),
             "memory_compacted": mem_context.get("memory_compacted", False),
             "long_term_summary": mem_context.get("long_term_summary", ""),
             "telemetry": telemetry,

@@ -5,6 +5,7 @@ from backend.app.core.logging import logger
 from backend.app.core.state import AnalystState
 from backend.app.graph.nodes import (
     analysis_node,
+    cache_node,
     guardrail_node,
     judge_node,
     planner_node,
@@ -14,13 +15,21 @@ from backend.app.graph.nodes import (
 )
 
 
+def route_cache(state: AnalystState) -> Literal["guardrail", "end"]:
+    """Conditional Edge: Short-circuit directly to END if Cache Hit, else proceed to guardrail."""
+    if state.get("semantic_cache_hit", False):
+        logger.info("[CacheManager] HIT! Bypassing all agent nodes & routing directly to END!")
+        return "end"
+    return "guardrail"
+
+
 def route_guardrail(state: AnalystState) -> Literal["planner", "end"]:
-    """Conditional Edge: Route to planner if safe, else terminate execution."""
+    """Conditional Edge: Route to planner if safe, else terminate execution directly to END."""
     status = state.get("guardrail_status", {})
-    if status.get("safe", True):
-        return "planner"
-    logger.warning("Routing graph to END due to Guardrail Security Block.")
-    return "end"
+    if not status.get("safe", True):
+        logger.warning("Routing graph to END due to Guardrail Security Block.")
+        return "end"
+    return "planner"
 
 
 def route_reflection(state: AnalystState) -> Literal["planner", "judge"]:
@@ -45,6 +54,7 @@ def create_analyst_graph():
     workflow = StateGraph(AnalystState)
 
     # 1. Add Nodes
+    workflow.add_node("cache", cache_node)
     workflow.add_node("guardrail", guardrail_node)
     workflow.add_node("planner", planner_node)
     workflow.add_node("router", router_node)
@@ -54,8 +64,20 @@ def create_analyst_graph():
     workflow.add_node("judge", judge_node)
 
     # 2. Add Fixed & Conditional Edges
-    workflow.add_edge(START, "guardrail")
+    # Entry Point -> Cache Node
+    workflow.add_edge(START, "cache")
 
+    # Cache Conditional Edge
+    workflow.add_conditional_edges(
+        "cache",
+        route_cache,
+        {
+            "guardrail": "guardrail",
+            "end": END,
+        },
+    )
+
+    # Guardrail Conditional Edge
     workflow.add_conditional_edges(
         "guardrail",
         route_guardrail,
