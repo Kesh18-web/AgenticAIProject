@@ -8,11 +8,10 @@ class AnalysisAgent:
     """Analysis Agent responsible for multi-step reasoning, comparison, and grounded report generation."""
 
     def generate_analysis(self, state: AnalystState) -> str:
-        """Synthesize evidence-grounded compliance report backed by context chunks using selected_model."""
+        """Synthesize evidence-grounded compliance report backed by context chunks or live MCP results using selected_model."""
         query = state.get("user_query", "")
         context_text = state.get("context_text", "")
         trace_id = state.get("trace_id", "N/A")
-        reranked_chunks = state.get("reranked_chunks", [])
         selected_model = state.get("selected_model", "gemini-1.5-pro")
         replan_count = state.get("reflection_count", 0)
         critique = state.get("reflection_critique", "")
@@ -37,53 +36,41 @@ class AnalysisAgent:
             else:
                 conversation_history_block = ""
 
-            # 1. Direct General Knowledge Bypass (when query doesn't require RAG documents)
-            if not requires_rag:
-                try:
-                    llm = get_llm(model_name=selected_model, temperature=0.3)
+            long_term_summary = state.get("long_term_summary", "")
+            memory_block = f"\nLong-Term Conversation Memory Summary: {long_term_summary}\n" if long_term_summary else ""
+
+            # Check if active context is present (from document retrieval or live MCP search execution)
+            has_context = bool(context_text) and context_text != "General Knowledge Query (RAG Search Bypassed)."
+
+            critique_instruction = ""
+            if replan_count > 0 and critique:
+                critique_instruction = f"\nRE-PLANNING FEEDBACK: A previous draft received low confidence due to the following critique: '{critique}'. Ensure this revised report explicitly addresses these missing evidence gaps!\n"
+
+            try:
+                llm = get_llm(model_name=selected_model, temperature=0.2)
+
+                if has_context:
                     prompt = (
                         f"{conversation_history_block}"
-                        f"User Inquiry: {query}\n\n"
+                        f"User Query: {query}\n"
+                        f"{memory_block}\n"
+                        f"Retrieved Grounded Context Chunks & Live Evidence:\n{context_text}\n"
+                        f"{critique_instruction}\n"
+                        "You are an Enterprise AI Lead Analyst. Use the conversation history above (if any) to recall prior context such as the user's name, preferences, or established facts.\n"
+                        "Mandatory Guidelines:\n"
+                        "1. Ground your answer directly in the provided context chunks or live web evidence.\n"
+                        "2. Use inline footnote citations like [Doc 1], [Doc 2] corresponding to chunk numbers if document chunks are present.\n"
+                        "3. STRICT GROUNDING RULE: If the retrieved evidence does not contain the answer to the user's specific question, explicitly state what information is missing. Do NOT fabricate facts outside the evidence.\n"
+                        "4. Format your response naturally: for direct questions, give a clear, direct answer without forcing unnecessary section headers. For comprehensive policy audits, use clean markdown headers."
+                    )
+                else:
+                    prompt = (
+                        f"{conversation_history_block}"
+                        f"User Inquiry: {query}\n"
+                        f"{memory_block}\n"
                         "You are an Enterprise AI Assistant. Use the conversation history above (if any) to recall prior context such as the user's name, preferences, or facts they shared. "
                         "Provide a clear, comprehensive, accurate, and direct response to the user inquiry."
                     )
-                    response = llm.invoke(prompt)
-                    report_text = str(response.content).strip()
-                    log.info(f"Direct General Knowledge Answer Generated ({len(report_text)} chars)")
-                    return report_text
-                except Exception as e:
-                    log.warning(f"[FALLBACK_TRIGGERED] General knowledge LLM response failed: {e}")
-                    return f"### Response\n{query}\n\n(Direct response synthesis unavailable)."
-
-            # 2. RAG Compliance Query Path (Requires retrieved evidence)
-            if not reranked_chunks:
-                report = f"### Executive Summary\nNo relevant documentation or policy evidence was found in corporate repositories for query: '{query}'."
-                return report
-
-            # 1. Try Live LLM Report Synthesis with Selected Model
-            try:
-                llm = get_llm(model_name=selected_model, temperature=0.2)
-                
-                critique_instruction = ""
-                if replan_count > 0 and critique:
-                    critique_instruction = f"\nRE-PLANNING FEEDBACK: A previous draft received low confidence due to the following critique: '{critique}'. Ensure this revised report explicitly addresses these missing evidence gaps!\n"
-
-                long_term_summary = state.get("long_term_summary", "")
-                memory_block = f"\nLong-Term Conversation Memory Summary: {long_term_summary}\n" if long_term_summary else ""
-
-                prompt = (
-                    f"{conversation_history_block}"
-                    f"User Query: {query}\n"
-                    f"{memory_block}\n"
-                    f"Retrieved Grounded Context Chunks:\n{context_text}\n"
-                    f"{critique_instruction}\n"
-                    "You are an Enterprise AI Lead Analyst. Use the conversation history above (if any) to recall prior context such as the user's name, preferences, or established facts.\n"
-                    "Mandatory Guidelines:\n"
-                    "1. Ground every claim directly in the provided context chunks.\n"
-                    "2. Use inline footnote citations like [Doc 1], [Doc 2] corresponding to the chunk numbers.\n"
-                    "3. STRICT GROUNDING RULE: If the retrieved context chunks do not contain the answer to the user's specific question (e.g., personal projects, specific work experiences, or dates), you MUST explicitly state: 'The provided documents do not contain information regarding [topic].' Do NOT fabricate, infer, or hallucinate any projects, facts, or details outside the provided evidence.\n"
-                    "4. Format your response naturally: for direct questions, give a clear, direct answer without forcing unnecessary section headers. For comprehensive policy audits, use clean markdown headers."
-                )
 
                 response = llm.invoke(prompt)
                 report_text = str(response.content).strip()
@@ -91,31 +78,9 @@ class AnalysisAgent:
                 return report_text
 
             except Exception as e:
-                log.warning(
-                    f"[FALLBACK_TRIGGERED] Live LLM AnalysisAgent call unavailable for model [{selected_model}] ({e}). Reverting to deterministic synthesis."
-                )
-
-            # 2. Heuristic Fallback Report Builder
-            report_lines = [
-                f"### Executive Analysis Report",
-                f"**Target Inquiry**: {query}\n",
-                "#### Key Findings & Grounded Evidence:",
-            ]
-
-            for idx, chunk in enumerate(reranked_chunks, start=1):
-                snippet = chunk.get("text", "").strip()
-                report_lines.append(f"{idx}. Based on corporate documentation [Doc {idx}], {snippet}")
-
-            report_lines.append("\n#### Compliance Conclusion:")
-            report_lines.append(
-                f"All retrieved policies ([Doc 1]-[{len(reranked_chunks)}]) indicate strict adherence to governance standards."
-            )
-
-            final_report = "\n".join(report_lines)
-            log.info(f"Fallback Synthesized report ({len(final_report)} characters)")
-            return final_report
+                log.error(f"AnalysisAgent LLM synthesis error: {e}")
+                return f"### Response\n{query}\n\n(Synthesis error occurred: {str(e)})"
 
 
 # Global singleton instance
 analysis_agent = AnalysisAgent()
-
