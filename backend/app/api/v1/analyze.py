@@ -21,18 +21,12 @@ class AnalyzeRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
     search_scope: Optional[str] = "session"
-    hitl_mode: Optional[bool] = False
-
-
-class ApprovePlanRequest(BaseModel):
-    session_id: str
-    approved: bool = True
-    bm25_weight_override: Optional[float] = None
-    dense_weight_override: Optional[float] = None
+    model_preference: Optional[str] = "auto"  # 'auto' | 'flash' | 'pro' | 'groq'
 
 
 async def stream_analysis_events(
-    query: str, session_id: str, search_scope: str = "session", hitl_mode: bool = False
+    query: str, session_id: str, search_scope: str = "session",
+    model_preference: str = "auto",
 ) -> AsyncGenerator[str, None]:
     """Async generator streaming LangGraph state machine node updates via SSE."""
     trace_id = f"trace-{str(uuid.uuid4())[:8]}"
@@ -51,13 +45,14 @@ async def stream_analysis_events(
         "short_term_turns": mem_context.get("short_term_turns", []),
         "memory_compacted": mem_context.get("memory_compacted", False),
         "reflection_count": 0,
+        "user_model_preference": model_preference or "auto",
     }
 
     logger.info(
-        f"Starting SSE Stream Analysis | session_id={session_id} | trace_id={trace_id} | search_scope={search_scope} | hitl_mode={hitl_mode}"
+        f"Starting SSE Stream Analysis | session_id={session_id} | trace_id={trace_id} | search_scope={search_scope}"
     )
 
-    yield f"data: {json.dumps({'event': 'start', 'trace_id': trace_id, 'query': query, 'search_scope': search_scope, 'hitl_mode': hitl_mode})}\n\n"
+    yield f"data: {json.dumps({'event': 'start', 'trace_id': trace_id, 'query': query, 'search_scope': search_scope})}\n\n"
 
     accumulated_state: Dict[str, Any] = dict(initial_state)
 
@@ -87,20 +82,6 @@ async def stream_analysis_events(
                     node_log["sub_tasks"] = plan.get("sub_tasks", [])
                     node_log["requires_mcp"] = plan.get("requires_mcp", False)
                     node_log["mcp_tools"] = plan.get("mcp_tools", [])
-                    node_log["explainability_reason"] = plan.get(
-                        "explainability_reason",
-                        "Balanced hybrid search selected to combine exact terms with semantic context.",
-                    )
-
-                    # If HITL Review mode is enabled, stream approval required event
-                    if hitl_mode:
-                        hitl_payload = {
-                            "event": "hitl_approval_required",
-                            "session_id": session_id,
-                            "plan": plan,
-                            "explainability_reason": node_log["explainability_reason"],
-                        }
-                        yield f"data: {json.dumps(hitl_payload)}\n\n"
 
                 elif node_name == "router":
                     node_log["selected_model"] = node_state.get("selected_model")
@@ -153,7 +134,6 @@ async def stream_analysis_events(
             "nodeEvents": accumulated_state.get("node_execution_logs", []),
             "cacheHit": accumulated_state.get("semantic_cache_hit", False),
             "cacheType": accumulated_state.get("cache_type", "semantic_vector"),
-            "explainabilityReason": accumulated_state.get("explainability_reason", ""),
             "memoryCompacted": mem_context.get("memory_compacted", False),
             "searchScope": search_scope,
         }
@@ -168,7 +148,6 @@ async def stream_analysis_events(
             "eval_scores": accumulated_state.get("judge_eval_scores", {}),
             "semantic_cache_hit": accumulated_state.get("semantic_cache_hit", False),
             "cache_type": accumulated_state.get("cache_type", "semantic_vector"),
-            "explainability_reason": accumulated_state.get("explainability_reason", ""),
             "memory_compacted": mem_context.get("memory_compacted", False),
             "long_term_summary": mem_context.get("long_term_summary", ""),
             "telemetry": telemetry,
@@ -183,21 +162,7 @@ async def stream_analysis_events(
         yield f"data: {json.dumps({'event': 'error', 'error': str(e)})}\n\n"
 
 
-@router.post("/approve_plan")
-async def approve_plan(req: ApprovePlanRequest):
-    """Human-in-the-Loop (HITL) REST Endpoint to approve or override AI execution strategy."""
-    logger.info(
-        f"[HITL Governance] Plan Approval Received | session_id={req.session_id} | approved={req.approved} | bm25_override={req.bm25_weight_override}"
-    )
-    return {
-        "session_id": req.session_id,
-        "status": "plan_approved" if req.approved else "plan_overridden",
-        "message": "Strategy approved. Graph execution proceeding.",
-        "overrides": {
-            "bm25_weight": req.bm25_weight_override,
-            "dense_weight": req.dense_weight_override,
-        },
-    }
+
 
 
 @router.post("/stream")
@@ -205,9 +170,9 @@ async def analyze_stream(req: AnalyzeRequest):
     """Stream real-time agent execution events and analysis report using Server-Sent Events (SSE)."""
     session_id = req.session_id or f"session-{str(uuid.uuid4())[:8]}"
     search_scope = req.search_scope or "session"
-    hitl_mode = req.hitl_mode or False
+    model_preference = req.model_preference or "auto"
     return StreamingResponse(
-        stream_analysis_events(req.query, session_id, search_scope, hitl_mode),
+        stream_analysis_events(req.query, session_id, search_scope, model_preference),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -14,7 +14,7 @@ async def get_health_status():
         "status": "healthy",
         "environment": settings.ENVIRONMENT,
         "qdrant_mode": settings.QDRANT_MODE,
-        "firestore_is_mock": firestore_db.is_mock,
+        "firestore_is_mock": getattr(firestore_db, "is_mock", False),
         "bm25_chunks_count": len(bm25_mgr.chunks),
         "llm_providers": {
             "openai": bool(settings.OPENAI_API_KEY),
