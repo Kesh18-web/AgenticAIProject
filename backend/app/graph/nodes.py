@@ -40,14 +40,12 @@ def cache_node(state: AnalystState) -> Dict[str, Any]:
 
     if cached_payload:
         cache_type = cached_payload.get("cache_type", "semantic_vector")
-        reason = cached_payload.get("explainability_reason", "Cached query response returned from ultra-fast enterprise cache.")
         return {
             "trace_id": trace_id,
             "analysis_report": cached_payload.get("analysis_report", ""),
             "citations": cached_payload.get("citations", []),
             "judge_eval_scores": cached_payload.get("judge_eval_scores", {"groundedness": 0.95, "citations": 0.90}),
             "output_guardrail_audit": cached_payload.get("output_guardrail_audit", {}),
-            "explainability_reason": reason,
             "cache_type": cache_type,
             "query_embedding": query_embedding,
             "semantic_cache_hit": True,
@@ -70,7 +68,11 @@ def guardrail_node(state: AnalystState) -> Dict[str, Any]:
 def planner_node(state: AnalystState) -> Dict[str, Any]:
     """LangGraph Node: Generate Execution Plan & Sub-Tasks."""
     plan = planner_agent.plan_analysis(state)
-    return {"plan": plan}
+    primary_source = plan.get("primary_knowledge_source", "PARAMETRIC_LLM")
+    return {
+        "plan": plan,
+        "primary_knowledge_source": primary_source,
+    }
 
 
 def router_node(state: AnalystState) -> Dict[str, Any]:
@@ -115,13 +117,17 @@ def retrieval_node(state: AnalystState) -> Dict[str, Any]:
             repo_name=github_repo,
         )
         if mcp_execution_results.get("data"):
-            mcp_lines = ["\n[Live Web & Real-Time Search Context]:"]
+            mcp_lines = ["\n[Live Tool & Execution Context]:"]
             for tool_name, tool_output in mcp_execution_results["data"].items():
+                tag_prefix = "GitHub" if "github" in tool_name else ("File" if "fs_" in tool_name else "Web")
                 if isinstance(tool_output, list):
                     for idx, item in enumerate(tool_output, start=1):
-                        mcp_lines.append(f"[Web {idx}] Source: {item.get('title', 'Live Data')}\nEvidence Snippet: {item.get('snippet', '')}")
+                        source_title = item.get('title', 'Live Data')
+                        source_url = item.get('url', '')
+                        source_str = f"{source_title} ({source_url})" if source_url else source_title
+                        mcp_lines.append(f"[{tag_prefix} {idx}] Source: {source_str}\nEvidence Snippet & Content:\n{item.get('snippet', '')}")
                 elif isinstance(tool_output, dict):
-                    mcp_lines.append(f"[Web 1] Evidence Snippet: {tool_output}")
+                    mcp_lines.append(f"[{tag_prefix} 1] Evidence Snippet:\n{tool_output}")
             mcp_context_block = "\n\n".join(mcp_lines)
 
     # Fast-path bypass for queries that do not require RAG document retrieval
@@ -252,12 +258,10 @@ def judge_node(state: AnalystState) -> Dict[str, Any]:
     citations = state.get("citations", [])
 
     if report:
-        explain_reason = state.get("plan", {}).get("explainability_reason", "Balanced hybrid search selected to combine exact terms with semantic context.")
         payload = {
             "analysis_report": report,
             "citations": citations,
             "judge_eval_scores": scores,
-            "explainability_reason": explain_reason,
             "output_guardrail_audit": state.get("output_guardrail_audit", {}),
         }
         cache_manager.store_cache(

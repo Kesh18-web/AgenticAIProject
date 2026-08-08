@@ -40,10 +40,12 @@ class AnalystState(TypedDict, total=False):
 
     # Dynamic Planning & Sub-Queries
     plan: Dict[str, Any]  # Sub-tasks & search strategies
+    primary_knowledge_source: Optional[str]  # PARAMETRIC_LLM | ENTERPRISE_RAG | REALTIME_WEB_MCP | GITHUB_MCP
     rewritten_queries: List[str]
 
     # Model Routing
-    selected_model: str  # e.g., 'gpt-4o', 'claude-3-5-sonnet', 'gemini-1.5-flash'
+    selected_model: str  # e.g., 'gemini-2.0-flash', 'gemini-1.5-pro', 'groq/llama-70b'
+    user_model_preference: Optional[str]  # 'auto' | 'flash' | 'pro' | 'groq' (from frontend selector)
 
     # Retrieval & Reranking
     retrieved_chunks: List[Dict[str, Any]]
