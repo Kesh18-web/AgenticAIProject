@@ -26,6 +26,10 @@ import {
   File as FileIcon,
   Globe,
   Check,
+  ChevronDown,
+  Cpu,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -66,8 +70,8 @@ interface ChatMessage {
   cacheHit?: boolean;
   cacheType?: string;
   memoryCompacted?: boolean;
-  explainabilityReason?: string;
   searchScope?: "session" | "global";
+  uploadStatus?: "success" | "skipped";
 }
 
 interface ChatSession {
@@ -131,7 +135,6 @@ export default function AnalystDashboard() {
             ...m,
             cacheHit: m.cacheHit ?? m.semantic_cache_hit ?? false,
             cacheType: m.cacheType ?? m.cache_type ?? "semantic_vector",
-            explainabilityReason: m.explainabilityReason ?? m.explainability_reason ?? "",
             nodeEvents: m.nodeEvents ?? m.node_execution_logs ?? [],
           }));
           setChats((prev) =>
@@ -196,6 +199,9 @@ export default function AnalystDashboard() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeChat?.messages]);
 
+  // ── Sidebar Expansion State ───────────────────────────────────────────────
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
+
   // ── Toast Notification State ───────────────────────────────────────────────
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -220,6 +226,19 @@ export default function AnalystDashboard() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [hitlMode, setHitlMode] = useState(false);
+
+  // Model selector: 'auto' | 'flash' | 'pro' | 'groq'
+  type ModelPreference = "auto" | "flash" | "pro" | "groq";
+  const [modelPreference, setModelPreference] = useState<ModelPreference>("auto");
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+
+  const MODEL_OPTIONS: { value: ModelPreference; label: string; desc: string; color: string; dotColor: string }[] = [
+    { value: "auto",  label: "Auto",     desc: "Automatic model selection", color: "text-slate-200", dotColor: "bg-indigo-400" },
+    { value: "flash", label: "Fast",     desc: "High-speed responses",     color: "text-slate-200", dotColor: "bg-slate-400" },
+    { value: "pro",   label: "Pro",      desc: "Deep reasoning engine",     color: "text-slate-200", dotColor: "bg-slate-400" },
+    { value: "groq",  label: "Ultra",    desc: "Maximum throughput",        color: "text-slate-200", dotColor: "bg-slate-400" },
+  ];
+  const activeModel = MODEL_OPTIONS.find((m) => m.value === modelPreference) ?? MODEL_OPTIONS[0];
 
   // Live node stepper state (only for the in-progress run)
   const [activeNode, setActiveNode] = useState<string | null>(null);
@@ -358,31 +377,43 @@ export default function AnalystDashboard() {
         throw new Error(errData.detail || "Upload failed");
       }
 
-      showToast("File uploaded successfully");
+      const data = await res.json();
+      const isSkipped = data.status === "skipped";
+
+      if (isSkipped) {
+        showToast("Document already uploaded in this session");
+      } else {
+        showToast("File uploaded successfully");
+      }
 
       // Auto-name chat if empty
       if (activeChat.messages.length === 0) {
-        autoNameChat(activeChat.id, `Doc: ${file.filename || file.name}`);
+        autoNameChat(activeChat.id, `Doc: ${file.name}`);
       }
 
       // Record file attachment in chat thread
       const attachMsg: ChatMessage = {
         id: genId(),
         role: "user",
-        content: `Uploaded document: ${file.name}`,
+        content: isSkipped ? `Uploaded document (duplicate): ${file.name}` : `Uploaded document: ${file.name}`,
         timestamp: new Date(),
         attachedFile: file.name,
         searchScope: activeChat.searchScope,
+        uploadStatus: isSkipped ? "skipped" : "success",
       };
 
       updateChat(activeChat.id, (c) => ({
         ...c,
-        attachedFiles: [...(c.attachedFiles || []), file.name],
+        attachedFiles: c.attachedFiles?.includes(file.name) ? c.attachedFiles : [...(c.attachedFiles || []), file.name],
         messages: [...c.messages, attachMsg],
       }));
     } catch (err: any) {
       console.error("File upload error:", err);
-      showToast(`Upload failed: ${err.message || err}`);
+      const isFetchErr = err?.message === "Failed to fetch" || err?.name === "TypeError";
+      const userErrMsg = isFetchErr
+        ? "Backend server starting up. Please try uploading again in a few seconds."
+        : `Upload failed: ${err.message || err}`;
+      showToast(userErrMsg);
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -439,6 +470,7 @@ export default function AnalystDashboard() {
           session_id: sessionId,
           search_scope: chat.searchScope,
           hitl_mode: hitlMode,
+          model_preference: modelPreference,
         }),
       });
 
@@ -463,9 +495,16 @@ export default function AnalystDashboard() {
               continue;
             try {
               const data = JSON.parse(jsonStr);
-              if (data.event === "node_complete") collectedNodeEvents.push(data);
-              else if (data.event === "hitl_approval_required") hitlPayload = data;
-              else if (data.event === "complete") completePayload = data;
+              if (data.event === "node_complete") {
+                collectedNodeEvents.push(data);
+                setActiveNode(data.node);
+                setNodeEvents((prev) => [...prev, data]);
+              } else if (data.event === "hitl_approval_required") {
+                hitlPayload = data;
+                setHitlRequired(true);
+              } else if (data.event === "complete") {
+                completePayload = data;
+              }
             } catch {
               /* ignore parse errors */
             }
@@ -473,55 +512,29 @@ export default function AnalystDashboard() {
         }
       }
 
-      // Animate node stepper
-      setActiveNode("guardrail");
-      setNodeEvents([]);
-      const NODE_STEP_MS = 600;
-      collectedNodeEvents.forEach((data, idx) => {
-        setTimeout(() => {
-          setActiveNode(data.node);
-          setNodeEvents((prev) => [...prev, data]);
-          if (data.node === "planner" && data.explainability_reason) {
-            setRunningExplainabilityReason(data.explainability_reason);
-          }
-        }, idx * NODE_STEP_MS);
-      });
+      // Immediately display response when stream completes
+      if (completePayload) {
+        setLatestTelemetry(completePayload.telemetry || null);
+        setActiveNode("complete");
 
-      if (hitlPayload) {
-        setTimeout(() => {
-          setHitlRequired(true);
-          setRunningExplainabilityReason(hitlPayload.explainability_reason);
-        }, collectedNodeEvents.length * NODE_STEP_MS);
+        const assistantMsg: ChatMessage = {
+          id: genId(),
+          role: "assistant",
+          content: completePayload.report || "",
+          timestamp: new Date(),
+          citations: completePayload.citations || [],
+          evalScores: completePayload.eval_scores || null,
+          telemetry: completePayload.telemetry || null,
+          nodeEvents: collectedNodeEvents,
+          cacheHit: completePayload.semantic_cache_hit || false,
+          cacheType: completePayload.cache_type || "semantic_vector",
+          memoryCompacted: completePayload.memory_compacted || false,
+          searchScope: chat.searchScope,
+        };
+
+        updateChat(chat.id, (c) => ({ ...c, messages: [...c.messages, assistantMsg] }));
       }
-
-      const totalDelay = collectedNodeEvents.length * NODE_STEP_MS + 200;
-      setTimeout(() => {
-        if (completePayload) {
-          setLatestTelemetry(completePayload.telemetry || null);
-          setActiveNode("complete");
-
-          const assistantMsg: ChatMessage = {
-            id: genId(),
-            role: "assistant",
-            content: completePayload.report || "",
-            timestamp: new Date(),
-            citations: completePayload.citations || [],
-            evalScores: completePayload.eval_scores || null,
-            telemetry: completePayload.telemetry || null,
-            nodeEvents: collectedNodeEvents,
-            cacheHit: completePayload.semantic_cache_hit || false,
-            cacheType: completePayload.cache_type || "semantic_vector",
-            memoryCompacted: completePayload.memory_compacted || false,
-            explainabilityReason: completePayload.explainability_reason || runningExplainabilityReason,
-            searchScope: chat.searchScope,
-          };
-
-          updateChat(chat.id, (c) => ({ ...c, messages: [...c.messages, assistantMsg] }));
-          // NOTE: Backend (analyze.py) already persists this message to Firestore.
-          // Do NOT save here again — that causes duplicate messages on chat reload.
-        }
-        setIsAnalyzing(false);
-      }, totalDelay);
+      setIsAnalyzing(false);
     } catch (err: any) {
       console.error("Stream analysis error:", err);
       setIsAnalyzing(false);
@@ -616,65 +629,57 @@ export default function AnalystDashboard() {
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-cyan-400 shadow-lg shadow-indigo-500/20">
             <Brain className="h-6 w-6 text-white" />
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-lg font-bold tracking-tight text-white">Enterprise AI Analyst</h1>
-              <span className="rounded-full bg-indigo-500/10 px-2.5 py-0.5 text-xs font-semibold text-indigo-400 border border-indigo-500/30">
-                V1 & V2 Platform
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">Modular AI Runtime • LangGraph • Qdrant RRF • Firestore</p>
-          </div>
+          <h1 className="text-lg font-bold tracking-tight text-white">Enterprise AI Analyst</h1>
         </div>
 
-        {/* System Badges */}
-        <div className="flex items-center gap-3 text-xs">
-          <div className="flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-1.5 border border-slate-800">
-            <Activity className="h-4 w-4 text-emerald-400" />
-            <span className="text-slate-300">Backend API:</span>
-            <span className="font-semibold text-emerald-400">
-              {backendStatus?.status === "healthy" ? "Online (Port 8000)" : "Connecting..."}
-            </span>
-          </div>
+        {/* System Telemetry Badges */}
+        {(() => {
+          const lastAssistantMsg = activeChat?.messages.filter((m) => m.role === "assistant").slice(-1)[0];
+          const activeTelemetry = latestTelemetry || lastAssistantMsg?.telemetry;
+          const tokens = activeTelemetry?.total_tokens ?? 0;
+          const cost = activeTelemetry?.formatted_cost ?? (activeTelemetry?.total_cost ? `$${Number(activeTelemetry.total_cost).toFixed(6)}` : "$0.000000");
 
-          {latestTelemetry && (
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1.5 rounded-lg bg-indigo-500/10 px-3 py-1.5 border border-indigo-500/30 text-indigo-300">
-                <Zap className="h-3.5 w-3.5 text-indigo-400" />
-                <span>{latestTelemetry.total_latency_ms}ms</span>
-              </div>
-              <div className="flex items-center gap-1.5 rounded-lg bg-cyan-500/10 px-3 py-1.5 border border-cyan-500/30 text-cyan-300">
-                <Terminal className="h-3.5 w-3.5 text-cyan-400" />
-                <span>{latestTelemetry.total_tokens} Tokens</span>
-              </div>
-              <div className="flex items-center gap-1.5 rounded-lg bg-emerald-500/10 px-3 py-1.5 border border-emerald-500/30 text-emerald-400 font-semibold">
-                <span>{latestTelemetry.formatted_cost}</span>
+          return (
+            <div className="flex items-center gap-3 text-xs">
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 rounded-lg bg-cyan-500/10 px-3 py-1.5 border border-cyan-500/30 text-cyan-300">
+                  <Terminal className="h-3.5 w-3.5 text-cyan-400" />
+                  <span>{tokens} Tokens</span>
+                </div>
+                <div className="flex items-center gap-1.5 rounded-lg bg-emerald-500/10 px-3 py-1.5 border border-emerald-500/30 text-emerald-400 font-semibold">
+                  <span>{cost}</span>
+                </div>
               </div>
             </div>
-          )}
-
-          <div className="flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-1.5 border border-slate-800 text-slate-300">
-            <Database className="h-4 w-4 text-cyan-400" />
-            <span>Qdrant:</span>
-            <span className="font-medium text-cyan-400">Cloud</span>
-          </div>
-        </div>
+          );
+        })()}
       </header>
 
       {/* Main Body */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left Sidebar */}
-        <aside className="w-64 border-r border-slate-800 bg-slate-950/60 flex flex-col">
+        <aside className={`${sidebarExpanded ? "w-96" : "w-64"} border-r border-slate-800 bg-slate-950/60 flex flex-col transition-all duration-300`}>
           {/* Platform Modules */}
           <div className="p-4 space-y-1 border-b border-slate-800">
-            <p className="px-3 text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">
-              Platform Modules
-            </p>
+            <div className="flex items-center justify-between px-1 mb-2">
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                Platform Modules
+              </p>
+              <button
+                onClick={() => setSidebarExpanded(!sidebarExpanded)}
+                title={sidebarExpanded ? "Collapse Sidebar" : "Expand Sidebar for full chat titles"}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/80 transition"
+              >
+                {sidebarExpanded ? (
+                  <PanelLeftClose className="h-4 w-4 text-indigo-400" />
+                ) : (
+                  <PanelLeftOpen className="h-4 w-4 text-slate-400" />
+                )}
+              </button>
+            </div>
             {[
               { id: "workbench", label: "Live Analyst Workbench", Icon: Bot },
               { id: "indexing", label: "Document Indexing Lab", Icon: Upload },
-              { id: "observability", label: "Judge & Telemetry Metrics", Icon: Scale },
-              { id: "architect", label: "AI Solution Architect (V2)", Icon: Layers },
             ].map(({ id, label, Icon }) => (
               <button
                 key={id}
@@ -743,17 +748,6 @@ export default function AnalystDashboard() {
               </div>
             ))}
           </div>
-
-          {/* Infra Footer */}
-          <div className="p-4 border-t border-slate-800">
-            <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-3 text-xs space-y-1 text-slate-400">
-              <div className="flex items-center gap-2 font-semibold text-slate-300">
-                <Zap className="h-3.5 w-3.5 text-amber-400" />
-                Hybrid Retrieval Active
-              </div>
-              <p>BM25 + Qdrant Dense Vector + Cross-Encoder Reranker</p>
-            </div>
-          </div>
         </aside>
 
         {/* Content Panel */}
@@ -778,6 +772,54 @@ export default function AnalystDashboard() {
                   )}
                 </div>
                 <div className="flex items-center gap-3">
+                  {/* ── Model Selector Dropdown ── */}
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setModelDropdownOpen((prev) => !prev)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition select-none ${
+                        modelDropdownOpen
+                          ? "bg-slate-800 border-slate-600 text-slate-200"
+                          : "bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-600 hover:text-slate-100"
+                      }`}
+                      title="Select AI model"
+                    >
+                      <span className={`h-2 w-2 rounded-full ${activeModel.dotColor} shrink-0`} />
+                      <span className={activeModel.color}>{activeModel.label}</span>
+                      <ChevronDown className={`h-3 w-3 text-slate-500 transition-transform ${modelDropdownOpen ? "rotate-180" : ""}`} />
+                    </button>
+
+                    {modelDropdownOpen && (
+                      <div
+                        className="absolute right-0 top-full mt-1.5 z-50 w-52 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl shadow-black/50 overflow-hidden"
+                        onMouseLeave={() => setModelDropdownOpen(false)}
+                      >
+                        <div className="px-3 py-2 border-b border-slate-800">
+                          <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Select Model</p>
+                        </div>
+                        {MODEL_OPTIONS.map((opt) => (
+                          <button
+                            key={opt.value}
+                            type="button"
+                            onClick={() => { setModelPreference(opt.value); setModelDropdownOpen(false); }}
+                            className={`flex items-start gap-2.5 w-full px-3 py-2.5 text-left transition hover:bg-slate-800 ${
+                              modelPreference === opt.value ? "bg-slate-800/70" : ""
+                            }`}
+                          >
+                            <span className={`mt-1 h-2 w-2 rounded-full shrink-0 ${opt.dotColor}`} />
+                            <div>
+                              <p className={`text-xs font-semibold ${opt.color}`}>{opt.label}</p>
+                              <p className="text-[10px] text-slate-500 mt-0.5">{opt.desc}</p>
+                            </div>
+                            {modelPreference === opt.value && (
+                              <Check className="h-3.5 w-3.5 text-indigo-400 ml-auto mt-0.5 shrink-0" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
                   {/* Single Global Workspace Knowledge Toggle */}
                   <button
                     type="button"
@@ -795,32 +837,6 @@ export default function AnalystDashboard() {
                       {activeChat?.searchScope === "global" ? "ON" : "OFF"}
                     </span>
                   </button>
-
-                  {/* HITL toggle */}
-                  <div className="flex items-center gap-1 bg-slate-900/90 p-1 rounded-xl border border-slate-800 text-xs">
-                    <button
-                      type="button"
-                      onClick={() => setHitlMode(false)}
-                      className={`px-3 py-1 rounded-lg transition font-medium ${
-                        !hitlMode
-                          ? "bg-emerald-600 text-white shadow-md shadow-emerald-500/20"
-                          : "text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      Auto-Pilot
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setHitlMode(true)}
-                      className={`px-3 py-1 rounded-lg transition font-medium ${
-                        hitlMode
-                          ? "bg-amber-600 text-white shadow-md shadow-amber-500/20"
-                          : "text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      HITL Review
-                    </button>
-                  </div>
                 </div>
               </div>
 
@@ -850,7 +866,9 @@ export default function AnalystDashboard() {
                               </div>
                               <div className="flex-1 min-w-0">
                                 <p className="text-xs font-semibold truncate text-slate-100">{msg.attachedFile}</p>
-                                <p className="text-[10px] text-cyan-400">Document indexed into current chat context</p>
+                                <p className={`text-[10px] ${msg.uploadStatus === "skipped" ? "text-amber-400 font-medium" : "text-cyan-400"}`}>
+                                  {msg.uploadStatus === "skipped" ? "Document already uploaded in this session" : "Document indexed into current chat context"}
+                                </p>
                               </div>
                             </div>
                           ) : (
@@ -879,12 +897,6 @@ export default function AnalystDashboard() {
                         <div className="flex-1 max-w-[85%] space-y-3">
                           {/* Badges row */}
                           <div className="flex flex-wrap gap-2">
-                            {msg.explainabilityReason && (
-                              <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 text-[11px] font-medium text-amber-300">
-                                <Sparkles className="h-3 w-3 text-amber-400" />
-                                {msg.explainabilityReason}
-                              </div>
-                            )}
                             {msg.cacheHit && (
                               msg.cacheType === "exact_hash" ? (
                                 <div className="flex items-center gap-1.5 text-[11px] bg-cyan-500/20 border border-cyan-400/40 text-cyan-300 px-3 py-1 rounded-lg font-bold shadow-md shadow-cyan-500/20 animate-pulse">
@@ -1024,22 +1036,22 @@ export default function AnalystDashboard() {
                             return (
                               <div
                                 key={id}
-                                className={`flex flex-col items-center rounded-xl p-2.5 border text-center transition-all ${
+                                className={`flex flex-col items-center rounded-xl p-2.5 border text-center transition-all duration-300 ${
                                   isActive
-                                    ? "bg-indigo-600/30 border-indigo-500 text-indigo-300 animate-pulse"
+                                    ? "bg-gradient-to-b from-indigo-600/40 via-indigo-700/30 to-slate-900 border-indigo-400 text-indigo-200 shadow-xl shadow-indigo-500/40 ring-2 ring-indigo-400/60 animate-pulse scale-105"
                                     : isDone
-                                    ? "bg-emerald-950/20 border-emerald-500/40 text-emerald-400"
-                                    : "bg-slate-950/40 border-slate-800 text-slate-600"
+                                    ? "bg-emerald-950/30 border-emerald-500/40 text-emerald-400 shadow-md shadow-emerald-950/30"
+                                    : "bg-slate-950/40 border-slate-800/80 text-slate-600 opacity-60"
                                 }`}
                               >
-                                <Icon className="h-4 w-4 mb-1" />
-                                <span className="text-[10px] font-medium">{name}</span>
+                                <Icon className={`h-4 w-4 mb-1 ${isActive ? "text-indigo-300 animate-bounce" : isDone ? "text-emerald-400" : ""}`} />
+                                <span className="text-[10px] font-semibold">{name}</span>
                                 {isDone && !isActive && (
                                   <CheckCircle2 className="h-3 w-3 mt-1 text-emerald-400" />
                                 )}
                                 {isActive && (
-                                  <span className="mt-1 text-[9px] bg-indigo-500 text-white px-1 py-0.5 rounded-full">
-                                    Active
+                                  <span className="mt-1 text-[9px] bg-indigo-500 text-white font-bold px-1.5 py-0.2 rounded-full shadow-sm animate-pulse">
+                                    Running
                                   </span>
                                 )}
                               </div>
@@ -1048,30 +1060,6 @@ export default function AnalystDashboard() {
                         </div>
                       </div>
                     </div>
-                  </div>
-                )}
-
-                {/* HITL Banner */}
-                {hitlRequired && !hitlApproved && (
-                  <div className="flex items-center justify-between rounded-xl bg-indigo-950/80 border border-indigo-500/50 p-3.5 text-xs text-indigo-200 shadow-lg mx-11">
-                    <div className="flex items-center gap-2">
-                      <ShieldCheck className="h-5 w-5 text-amber-400 shrink-0" />
-                      <span><strong>Human-in-the-Loop Review:</strong> Review AI strategy before database execution.</span>
-                    </div>
-                    <button
-                      onClick={async () => {
-                        setHitlApproved(true);
-                        setHitlRequired(false);
-                        await fetch("http://localhost:8000/api/v1/analyze/approve_plan", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ session_id: activeChat.id, approved: true }),
-                        });
-                      }}
-                      className="rounded-lg bg-emerald-600 px-4 py-1.5 font-semibold text-white hover:bg-emerald-500 transition shadow-md ml-4 shrink-0"
-                    >
-                      Approve Strategy
-                    </button>
                   </div>
                 )}
 
@@ -1174,10 +1162,20 @@ export default function AnalystDashboard() {
                           });
                           if (!res.ok) throw new Error("Upload failed");
                           const data = await res.json();
-                          setIndexingStatus(`✅ Indexed '${data.filename || data.title}' into Global Workspace Knowledge! (Chunks: ${data.chunks_indexed})`);
-                          showToast("Document uploaded successfully");
+                          if (data.status === "skipped") {
+                            setIndexingStatus(`⚠️ '${data.filename || data.title}' already uploaded in Global Workspace Knowledge!`);
+                            showToast("Document already uploaded in Global Workspace");
+                          } else {
+                            setIndexingStatus(`✅ Indexed '${data.filename || data.title}' into Global Workspace Knowledge! (Chunks: ${data.chunks_indexed})`);
+                            showToast("Document uploaded successfully");
+                          }
                         } catch (err: any) {
-                          setIndexingStatus(`Error: ${err.message || err}`);
+                          const isFetchErr = err?.message === "Failed to fetch" || err?.name === "TypeError";
+                          const userErrMsg = isFetchErr
+                            ? "Backend server is starting up. Please try again in a few seconds."
+                            : `Error: ${err.message || err}`;
+                          setIndexingStatus(userErrMsg);
+                          showToast(userErrMsg);
                         } finally {
                           if (labFileInputRef.current) labFileInputRef.current.value = "";
                         }
