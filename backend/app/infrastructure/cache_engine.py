@@ -14,7 +14,12 @@ try:
     import redis
     if settings.REDIS_URL:
         redis_client = redis.Redis.from_url(
-            settings.REDIS_URL, decode_responses=True, socket_timeout=2.0
+            settings.REDIS_URL,
+            decode_responses=True,
+            socket_timeout=0.2,
+            socket_connect_timeout=0.2,
+            health_check_interval=30,
+            retry_on_timeout=False,
         )
         # Test ping connection
         redis_client.ping()
@@ -87,8 +92,8 @@ class EnterpriseCacheManager:
         self._memory_exact_store: Dict[str, Dict[str, Any]] = {}
         self._memory_semantic_entries: List[Dict[str, Any]] = []
 
-    def _hash_key(self, query: str, session_id: str, search_scope: str) -> str:
-        raw_str = f"{query.strip().lower()}:{session_id}:{search_scope}"
+    def _hash_key(self, query: str, session_id: str, search_scope: str = "") -> str:
+        raw_str = f"{query.strip().lower()}:{session_id}"
         return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
 
     def _load_semantic_entries_from_redis(self) -> List[Dict[str, Any]]:
@@ -102,19 +107,20 @@ class EnterpriseCacheManager:
                 self._memory_semantic_entries = entries
                 return entries
         except Exception as e:
-            logger.warning(f"[CacheManager] Redis semantic read error: {e}")
+            logger.warning(f"[CacheManager] Redis semantic read fallback (1.0s timeout): {e}")
         return self._memory_semantic_entries
 
     def _save_semantic_entries_to_redis(self) -> None:
-        """Persist in-memory semantic entries to Redis (capped at 500 entries)."""
+        """Persist in-memory semantic entries to Redis (capped at recent 50 lightweight entries to prevent network socket stalls)."""
         if not HAS_REDIS or not redis_client:
             return
         try:
-            recent = self._memory_semantic_entries[-500:]
+            # Cap at recent 50 entries to keep network payload under 100KB
+            recent = self._memory_semantic_entries[-50:]
             self._memory_semantic_entries = recent
             redis_client.set("cache:semantic:entries", json.dumps(recent), ex=self.ttl_seconds)
         except Exception as e:
-            logger.error(f"[CacheManager] Redis semantic write error: {e}")
+            logger.warning(f"[CacheManager] Redis semantic write fallback (1.0s timeout): {e}")
 
     def check_cache(
         self, query: str, session_id: str, search_scope: str, trace_id: str = "N/A"
@@ -123,8 +129,8 @@ class EnterpriseCacheManager:
         Single Entry-Point Cache Evaluation.
         Returns (cached_payload, query_vector).
 
-        Tier-1: Exact SHA-256 hash match (scoped by session_id + search_scope).
-        Tier-2: Semantic cosine similarity scan filtered to same session_id + search_scope.
+        Tier-1: Exact SHA-256 hash match (scoped by session_id).
+        Tier-2: Semantic cosine similarity scan (scoped by session_id).
 
         cache_type is set HERE at read time — never read from stored payload.
         """
@@ -157,7 +163,7 @@ class EnterpriseCacheManager:
                 return payload, []
 
             # ── 2. TIER 2: Semantic Vector Scan (Cosine Similarity >= 0.85) ───
-            # Scoped to same session_id + search_scope only — NO cross-session leakage!
+            # Scoped to same session_id only — NO cross-session leakage!
             try:
                 query_vector = embedding_engine.embed(query)
             except Exception as e:
@@ -178,10 +184,8 @@ class EnterpriseCacheManager:
                 # Skip expired entries
                 if now - entry.get("timestamp", 0) > self.ttl_seconds:
                     continue
-                # ── CRITICAL: scope check — only match same session + search_scope ──
+                # ── CRITICAL: Session scope check — match any query within the SAME chat session ──
                 if entry.get("session_id") != session_id:
-                    continue
-                if entry.get("search_scope") != search_scope:
                     continue
 
                 score = cosine_similarity(query_vector, entry.get("vector", []))
