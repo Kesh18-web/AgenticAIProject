@@ -10,6 +10,11 @@ future_scope.md
 frontend/AGENTS.md
 frontend/CLAUDE.md
 
+# Benchmark results & quality report artifacts
+*benchmark*
+backend/reports/
+backend/app/data/benchmark_results/
+
 # Python virtual environment & cache
 venv/
 backend/venv/
