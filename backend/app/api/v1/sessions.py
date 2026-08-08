@@ -110,20 +110,21 @@ async def generate_session_name(session_id: str, body: Dict[str, Any]):
     Persists the generated name to Firestore automatically.
     """
     try:
-        from backend.app.core.llm import get_llm
+        from backend.app.core.llm import get_llm, extract_text_content
 
         first_query = body.get("query", "").strip()
         if not first_query:
             raise HTTPException(status_code=400, detail="query field is required")
 
-        llm = get_llm(model_name="gemini-2.0-flash", temperature=0.3, max_tokens=20)
+        # Use Groq for fast, lightweight, quota-friendly chat titling
+        llm = get_llm(model_name="groq/llama-70b", temperature=0.3, max_tokens=20)
         prompt = (
             "Generate a concise, descriptive chat title (4-6 words max) for the following user query. "
             "Do NOT use quotes, punctuation, or markdown. Output plain text title only.\n\n"
             f"Query: {first_query}\n\nTitle:"
         )
         response = llm.invoke(prompt)
-        name = str(response.content).strip().strip('"').strip("'").strip()
+        name = extract_text_content(response.content).strip('"').strip("'").strip()
 
         # Truncate hard limit safety
         if len(name) > 60:
