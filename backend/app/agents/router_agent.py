@@ -1,77 +1,95 @@
+"""
+Model Router Agent — Smart, clean model selection.
+
+Priority order:
+  1. User explicitly picked a model from the frontend selector  → use it directly (0ms)
+  2. Auto mode                                                  → lightweight Groq call to decide
+                                                                   between gemini-2.0-flash and groq
+  3. Groq unavailable for auto call                            → deterministic fallback (0ms)
+"""
 import json
 from typing import Any, Dict
+
 from backend.app.core.config import settings
-from backend.app.core.llm import get_llm
 from backend.app.core.logging import logger, logger_timer
 from backend.app.core.state import AnalystState
 
+# Model identifiers used throughout the system
+MODEL_FLASH = "gemini-2.5-flash"
+MODEL_PRO = "gemini-2.5-pro"
+MODEL_GROQ = "groq/llama-70b"
+
 
 class ModelRouterAgent:
-    """Model Router Agent allocating the optimal LLM based on task complexity, cost, and latency."""
+    """
+    Model Router Agent.
+    For 'auto' mode: uses a cheap Groq call to classify query complexity.
+    For explicit user selections: returns immediately (0ms).
+    """
 
     def select_model(self, task_type: str, state: AnalystState) -> str:
-        """Route to optimal model (Gemini Flash, Groq, Gemini Pro, GPT-4o) using Live LLM complexity rating."""
         trace_id = state.get("trace_id", "N/A")
         query = state.get("user_query", "")
+        user_pref = state.get("user_model_preference", "auto")
+        source = state.get("primary_knowledge_source", "PARAMETRIC_LLM")
 
         with logger_timer("ModelRouterAgent: Route Allocation", trace_id=trace_id) as log:
-            # 1. Try Live LLM Complexity Classification
-            try:
-                llm = get_llm(temperature=0.0)
-                prompt = (
-                    f"User Query: '{query}'\n"
-                    f"Target Task Type: '{task_type}'\n\n"
-                    "You are an AI System Model Router. Rate query complexity from 1 to 10 and allocate a model tier.\n"
-                    "Tier Guidelines:\n"
-                    "- FAST_TIER (complexity 1-6): For simple policy lookups, keyword extractions, fast tasks -> gemini-1.5-flash or groq/llama-3-70b\n"
-                    "- REASONING_TIER (complexity 7-10): For multi-document synthesis, complex governance, solution architecture -> gemini-1.5-pro or gpt-4o\n\n"
-                    "Respond ONLY with a JSON object:\n"
-                    '{"complexity_score": 4, "recommended_tier": "FAST_TIER", "selected_model": "gemini-1.5-flash", "reason": "Simple lookup"}'
-                )
 
-                response = llm.invoke(prompt)
-                text = str(response.content).strip()
+            # ── 1. Explicit user selection from frontend dropdown ────────────
+            if user_pref == "flash":
+                log.info(f"[Router] User-selected Flash → {MODEL_FLASH}")
+                return MODEL_FLASH
 
-                if text.startswith("```json"):
-                    text = text.replace("```json", "").replace("```", "").strip()
-                elif text.startswith("```"):
-                    text = text.replace("```", "").strip()
+            if user_pref == "pro":
+                log.info(f"[Router] User-selected Pro → {MODEL_PRO}")
+                return MODEL_PRO
 
-                data = json.loads(text)
-                selected = data.get("selected_model", "gemini-1.5-flash")
-                log.info(
-                    f"Live LLM Router Allocation -> Model: [{selected}] | Tier: {data.get('recommended_tier')} | Complexity: {data.get('complexity_score')}/10"
-                )
-                return selected
+            if user_pref == "groq":
+                log.info(f"[Router] User-selected Groq → {MODEL_GROQ}")
+                return MODEL_GROQ
 
-            except Exception as e:
-                # Explicit Fallback Warning
-                log.warning(
-                    f"[FALLBACK_TRIGGERED] Live LLM Router call unavailable ({e}). Reverting to rule-based fallback routing."
-                )
+            # ── 2. Auto mode: lightweight Groq complexity classification ─────
+            # Use groq/llama-3.1-8b-instant — ultra-fast, minimal tokens
+            if settings.GROQ_API_KEY:
+                try:
+                    from backend.app.core.llm import get_llm
 
-                # Rule-based fallback matrix
-                if task_type in ["query_rewrite", "guardrail", "routing"]:
-                    if settings.GROQ_API_KEY:
-                        selected = "groq/llama-3-70b"
-                    elif settings.GEMINI_API_KEY:
-                        selected = "gemini-1.5-flash"
+                    # Use Groq 8B for ultra-fast routing decision
+                    groq_router_llm = get_llm(model_name="groq/llama-70b", temperature=0.0)
+
+                    prompt = (
+                        "You are a query complexity classifier. Analyze this user query and decide the optimal LLM tier.\n\n"
+                        "Rules:\n"
+                        "- If the query is a simple factual question, quick lookup, or short general question → use 'groq'\n"
+                        "- If the query requires document analysis, multi-step reasoning, synthesis, or is RAG-based → use 'flash'\n\n"
+                        f"Query: \"{query}\"\n"
+                        f"Knowledge source needed: {source}\n\n"
+                        "Reply with ONLY one word: 'flash' or 'groq'"
+                    )
+
+                    response = groq_router_llm.invoke(prompt)
+                    decision = str(response.content).strip().lower().replace("'", "").replace("\"", "")
+
+                    if "groq" in decision:
+                        selected = MODEL_GROQ
                     else:
-                        selected = "mock-fast-model"
-                elif task_type in ["analysis", "reflection", "solution_architect"]:
-                    if settings.OPENAI_API_KEY:
-                        selected = "gpt-4o"
-                    elif settings.GEMINI_API_KEY:
-                        selected = "gemini-1.5-pro"
-                    else:
-                        selected = "mock-reasoning-model"
-                else:
-                    selected = "gemini-1.5-flash"
+                        selected = MODEL_FLASH
 
-                log.info(f"Fallback Route Allocated -> [{selected}]")
-                return selected
+                    log.info(f"[Router] Auto (Groq LLM) → '{decision}' → {selected}")
+                    return selected
+
+                except Exception as e:
+                    log.warning(f"[Router] Groq auto-routing call failed ({e}). Using deterministic fallback.")
+
+            # ── 3. Deterministic fallback (Groq key not set or call failed) ──
+            # RAG queries need Flash; quick general queries go to Groq if available
+            if source == "PARAMETRIC_LLM" and len(query) < 120 and settings.GROQ_API_KEY:
+                log.info(f"[Router] Deterministic fallback → {MODEL_GROQ} (short general query)")
+                return MODEL_GROQ
+
+            log.info(f"[Router] Deterministic fallback → {MODEL_FLASH} (default)")
+            return MODEL_FLASH
 
 
-# Global singleton instance
+# Global singleton
 model_router_agent = ModelRouterAgent()
-
