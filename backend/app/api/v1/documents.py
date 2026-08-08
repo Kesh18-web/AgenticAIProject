@@ -25,7 +25,23 @@ class DocumentUploadRequest(BaseModel):
 async def index_document(req: DocumentUploadRequest):
     """Index document text content into BM25 Keyword store, Qdrant Dense Vector store, and Firestore metadata."""
     try:
-        doc_id = f"doc_{str(uuid.uuid4())[:8]}"
+        import hashlib
+        content_hash = hashlib.sha256(req.content.encode("utf-8")).hexdigest()[:12]
+        doc_id = f"doc_{content_hash}"
+
+        # ── DEDUPLICATION CHECK ──
+        existing_doc = firestore_db.get_document("uploaded_documents", doc_id)
+        if existing_doc and existing_doc.get("session_id") == req.session_id:
+            logger.info(
+                f"[DocumentDeduplication] Document '{req.title}' (hash={content_hash}) already indexed for session '{req.session_id}'. Skipping indexing."
+            )
+            return {
+                "status": "skipped",
+                "doc_id": doc_id,
+                "title": req.title,
+                "chunks_indexed": existing_doc.get("chunks_indexed", 0),
+                "message": "Document already indexed for this session.",
+            }
 
         # Basic paragraph chunking heuristic
         raw_paragraphs = [p.strip() for p in req.content.split("\n\n") if p.strip()]
@@ -70,6 +86,7 @@ async def index_document(req: DocumentUploadRequest):
                 "title": req.title,
                 "source_name": req.source_name,
                 "session_id": req.session_id,
+                "content_hash": content_hash,
                 "chunks_indexed": len(chunks),
                 "timestamp": datetime.utcnow().isoformat(),
             },
@@ -97,12 +114,34 @@ async def upload_file(
 ):
     """Upload raw PDF or text document file, extract content, and index into hybrid search stores."""
     try:
+        import hashlib
         content_bytes = await file.read()
         doc_title = title or file.filename or "Uploaded Document"
         filename_lower = (file.filename or "").lower()
 
+        # Compute deterministic content SHA-256 hash
+        content_hash = hashlib.sha256(content_bytes).hexdigest()[:12]
+        doc_id = f"doc_{content_hash}"
+
+        # ── DEDUPLICATION CHECK: Skip pipeline if file content is identical ──
+        existing_doc = firestore_db.get_document("uploaded_documents", doc_id)
+        if existing_doc and (existing_doc.get("session_id") == session_id or session_id in ["global", "global_workspace"]):
+            is_global = session_id in ["global", "global_workspace"]
+            msg = "Document already uploaded in Global Workspace." if is_global else "Document already uploaded in this session."
+            logger.info(
+                f"[DocumentDeduplication] File '{file.filename}' (hash={content_hash}) already indexed for session '{session_id}'. Skipping chunking & embedding."
+            )
+            return {
+                "status": "skipped",
+                "doc_id": doc_id,
+                "title": doc_title,
+                "filename": file.filename,
+                "chunks_indexed": existing_doc.get("chunks_indexed", 0),
+                "session_id": session_id,
+                "message": msg,
+            }
+
         chunks: List[Dict[str, Any]] = []
-        doc_id = f"doc_{str(uuid.uuid4())[:8]}"
 
         if filename_lower.endswith(".pdf"):
             try:
@@ -173,6 +212,7 @@ async def upload_file(
                 "title": doc_title,
                 "source_name": file.filename or "Uploaded File",
                 "session_id": session_id,
+                "content_hash": content_hash,
                 "chunks_indexed": len(chunks),
                 "timestamp": datetime.utcnow().isoformat(),
             },

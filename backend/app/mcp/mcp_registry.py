@@ -1,8 +1,7 @@
 from typing import Any, Dict, List, Optional
 from backend.app.core.logging import logger
 from backend.app.mcp.browser_mcp import search_web
-from backend.app.mcp.fs_mcp import list_uploads_files, read_upload_file
-from backend.app.mcp.github_mcp import get_github_issues_prs, search_github_code
+from backend.app.mcp.github_mcp import get_github_commits, get_github_issues_prs, search_github_code
 
 
 class MCPToolRegistry:
@@ -10,11 +9,10 @@ class MCPToolRegistry:
 
     def __init__(self):
         self.registered_tools = {
-            "browser_search": "Execute live web search for real-time compliance news and standards",
-            "fs_list_files": "List uploaded raw files in the server's uploads folder",
-            "fs_read_file": "Read raw text content of an uploaded file from server storage",
+            "browser_search": "Execute live web search for real-time news, weather and external data",
             "github_code_search": "Search code files across any specified target GitHub repository ('owner/repo')",
             "github_issues_search": "Fetch open/closed issues and PRs from any specified target GitHub repository",
+            "github_commits": "Fetch the most recent commits from any specified target GitHub repository",
         }
 
     def execute_mcp_tools(
@@ -38,17 +36,6 @@ class MCPToolRegistry:
                     mcp_results["data"]["browser_search"] = res
                     mcp_results["executed_tools"].append("browser_search")
 
-                elif tool_clean == "fs_list_files":
-                    res = list_uploads_files()
-                    mcp_results["data"]["fs_list_files"] = res
-                    mcp_results["executed_tools"].append("fs_list_files")
-
-                elif tool_clean == "fs_read_file":
-                    target_file = filename or "SOC2_Security_Policy_2025.pdf"
-                    res = read_upload_file(target_file)
-                    mcp_results["data"]["fs_-read_file"] = res
-                    mcp_results["executed_tools"].append("fs_read_file")
-
                 elif tool_clean == "github_code_search":
                     res = search_github_code(query=query, repo_name=repo_name)
                     mcp_results["data"]["github_code_search"] = res
@@ -58,6 +45,11 @@ class MCPToolRegistry:
                     res = get_github_issues_prs(repo_name=repo_name)
                     mcp_results["data"]["github_issues_search"] = res
                     mcp_results["executed_tools"].append("github_issues_search")
+
+                elif tool_clean == "github_commits":
+                    res = get_github_commits(repo_name=repo_name)
+                    mcp_results["data"]["github_commits"] = res
+                    mcp_results["executed_tools"].append("github_commits")
 
                 else:
                     logger.warning(f"[MCP Registry] Unknown tool requested: '{tool}'")

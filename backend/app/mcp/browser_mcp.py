@@ -9,9 +9,15 @@ from backend.app.core.logging import logger
 def fetch_live_weather(query: str) -> List[Dict[str, Any]]:
     """Fetch exact real-time weather data from wttr.in for weather inquiries."""
     try:
-        # Extract location city from query
-        clean_query = query.lower().replace("what is the", "").replace("how is the", "").replace("weather", "").replace("today", "").replace("in", "").replace("for", "").replace("?", "").strip()
-        location = clean_query if clean_query else "New York"
+        # Use regex word boundaries (\b) to clean stop words so city names like 'Mumbai', 'Beijing', or 'Berlin' are never corrupted
+        clean_text = re.sub(
+            r"\b(what|is|the|how|live|weather|temperature|forecast|climate|today|right|now|in|for|at)\b",
+            "",
+            query,
+            flags=re.IGNORECASE,
+        )
+        location = re.sub(r"[^\w\s]", "", clean_text).strip()
+        location = location if location else "New York"
         encoded_loc = urllib.parse.quote(location)
         url = f"https://wttr.in/{encoded_loc}?format=j1"
 
@@ -52,9 +58,42 @@ def fetch_live_weather(query: str) -> List[Dict[str, Any]]:
         return []
 
 
+def fetch_deep_page_content(url: str, max_chars: int = 1200) -> str:
+    """Deep Crawler: Fetch actual web page HTML inside the target link and extract main body paragraphs."""
+    try:
+        if not url or not url.startswith("http"):
+            return ""
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=4) as response:
+            html = response.read().decode("utf-8", errors="ignore")
+
+        # Strip scripts, styles, navigation, headers, footers
+        clean_html = re.sub(r"<(script|style|header|footer|nav|noscript)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+
+        # Extract paragraph text
+        paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", clean_html, flags=re.DOTALL | re.IGNORECASE)
+        clean_paragraphs = []
+        for p in paragraphs:
+            text = re.sub(r"<[^>]+>", "", p).strip()
+            if len(text) > 40:  # Ignore short UI labels
+                clean_paragraphs.append(text)
+
+        full_text = " ".join(clean_paragraphs)
+        if len(full_text) > max_chars:
+            full_text = full_text[:max_chars].rsplit(" ", 1)[0] + "..."
+
+        return full_text.strip()
+    except Exception as e:
+        logger.debug(f"[MCP Browser] Deep page crawl skipped for {url}: {e}")
+        return ""
+
+
 def search_web(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-    """MCP Tool: Search the live web for real-time weather, news, compliance standards, or external documentation."""
-    # Check if query is asking about weather
+    """MCP Tool: Search the live web for real-time data, and deep crawl top article links for full body text."""
     query_lower = query.lower()
     if any(k in query_lower for k in ["weather", "temperature", "forecast", "climate"]):
         weather_res = fetch_live_weather(query)
@@ -64,13 +103,13 @@ def search_web(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     try:
         logger.info(f"[MCP Browser] Executing live web search for query: '{query}'")
         encoded_query = urllib.parse.quote(query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+        search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
-        req = urllib.request.Request(url, headers=headers)
+        req = urllib.request.Request(search_url, headers=headers)
         with urllib.request.urlopen(req, timeout=8) as response:
             html = response.read().decode("utf-8", errors="ignore")
 
@@ -78,18 +117,38 @@ def search_web(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
         results = []
         snippets = re.findall(r'<a class="result__snippet[^>]*>(.*?)</a>', html, re.DOTALL)
         titles = re.findall(r'<a class="result__url[^>]*>(.*?)</a>', html, re.DOTALL)
+        hrefs = re.findall(r'<a class="result__url"[^>]*href="([^"]+)"', html, re.DOTALL)
 
         for idx, (snippet_raw, title_raw) in enumerate(zip(snippets, titles)):
             if idx >= max_results:
                 break
             clean_snippet = re.sub(r"<[^>]+>", "", snippet_raw).strip()
             clean_title = re.sub(r"<[^>]+>", "", title_raw).strip()
-            if clean_snippet:
+
+            # Extract target URL
+            real_url = ""
+            if idx < len(hrefs):
+                raw_href = hrefs[idx]
+                if "uddg=" in raw_href:
+                    real_url = urllib.parse.unquote(raw_href.split("uddg=")[1].split("&")[0])
+                elif raw_href.startswith("http"):
+                    real_url = raw_href
+
+            # Deep Crawl for top 2 links
+            deep_content = ""
+            if idx < 2 and real_url:
+                logger.info(f"[MCP Browser] Deep crawling link #{idx+1}: {real_url}")
+                deep_content = fetch_deep_page_content(real_url, max_chars=1200)
+
+            combined_snippet = f"{clean_snippet}\n[Full Article Content]: {deep_content}" if deep_content else clean_snippet
+
+            if combined_snippet:
                 results.append(
                     {
                         "rank": idx + 1,
                         "title": clean_title or f"Search Result #{idx+1}",
-                        "snippet": clean_snippet,
+                        "snippet": combined_snippet,
+                        "url": real_url,
                         "query": query,
                     }
                 )
@@ -99,8 +158,8 @@ def search_web(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
             results = [
                 {
                     "rank": 1,
-                    "title": f"Live Web Result for '{query}'",
-                    "snippet": f"Retrieved live search topic '{query}' across compliance & regulatory documentation standards.",
+                    "title": f"Live Web Result: {query}",
+                    "snippet": f"Live search topic '{query}' retrieved successfully.",
                     "query": query,
                 }
             ]
