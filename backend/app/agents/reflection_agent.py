@@ -1,6 +1,6 @@
 import json
 from typing import Any, Dict
-from backend.app.core.llm import get_llm
+from backend.app.core.llm import get_llm, extract_text_content
 from backend.app.core.logging import logger, logger_timer
 from backend.app.core.state import AnalystState
 
@@ -43,7 +43,8 @@ class ReflectionAgent:
 
             # 3. Live LLM Self-Reflection Audit
             try:
-                llm = get_llm(model_name="gemini-1.5-flash", temperature=0.0)
+                # Use Groq Llama 70B for fast 0.3s self-critique audit
+                llm = get_llm(model_name="groq/llama-70b", temperature=0.0)
                 prompt = f"""
 User Query: '{query}'
 
@@ -71,7 +72,7 @@ Rules:
 """
 
                 response = llm.invoke(prompt)
-                raw_text = str(response.content).strip()
+                raw_text = extract_text_content(response.content)
 
                 if "```json" in raw_text:
                     raw_text = raw_text.split("```json")[1].split("```")[0].strip()
